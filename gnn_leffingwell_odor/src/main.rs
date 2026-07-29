@@ -1,6 +1,6 @@
 use burn::tensor::{Tensor, backend::Backend};
-use purr::{graph::Builder, read::Trace, write::Writer};
 
+mod model;
 mod smiles;
 
 fn computation<B: Backend>() {
@@ -12,20 +12,21 @@ fn computation<B: Backend>() {
     println!("{:}", tensor1 + tensor2);
 }
 
+// load_data, given a dataset CSV path, generates a vector of chemicals.
+// These chemicals hold the graph representation, labels, and various other features.
+fn load_data(path: &str) -> Result<Vec<smiles::Chemical>, csv::Error> {
+    let mut dataset: Vec<smiles::Chemical> = Vec::new();
+    let mut rdr = csv::Reader::from_path(path)?;
+    for res in rdr.deserialize() {
+        dataset.push(res?);
+    }
+    Ok(dataset)
+}
+
 fn main() {
     println!("Hello, world!");
     computation::<burn::backend::Wgpu>();
 
-    // Building a dataset.
-    let mut dataset: Vec<smiles::Chemical> = Vec::new();
-
-    // Not safe, just doing this for poc.
-    let mut rdr = csv::Reader::from_path("./data/leffingwell_data.csv").unwrap();
-    for res in rdr.deserialize() {
-        let rec: smiles::Chemical = res.unwrap();
-        // Add this graph data to the dataset.
-        dataset.push(rec);
-    }
-
+    let dataset = load_data("./data/leffingwell_data.csv").unwrap();
     println!("{:?}", dataset.len())
 }

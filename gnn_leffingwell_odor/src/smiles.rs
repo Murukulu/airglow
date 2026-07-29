@@ -1,4 +1,3 @@
-use burn::optim::LBFGSConfig;
 use purr::{
     feature::{Aliphatic, Aromatic, AtomKind, BondKind, BracketSymbol, Element},
     graph::{Atom, Bond, Builder},
