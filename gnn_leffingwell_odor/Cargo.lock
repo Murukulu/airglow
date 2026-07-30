@@ -3007,6 +3007,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "csv",
+ "num-traits",
  "purr",
  "serde",
 ]
