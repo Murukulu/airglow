@@ -42,6 +42,16 @@ impl burn::data::dataset::Dataset<smiles::Chemical> for LeffingwellDataset {
 
 impl<B: Backend> Batcher<B, smiles::Chemical, ChemicalBatch<B>> for ChemicalBatcher {
     fn batch(&self, chemicals: Vec<smiles::Chemical>, device: &B::Device) -> ChemicalBatch<B> {
+        let mut base: usize = 0;
+
+        // Note, this should never be empty. This tracks the max length of any elements.
+        // Used for padding later.
+        let max_num_edges: usize = chemicals
+            .iter()
+            .map(|c| c.smiles.edges.len())
+            .max()
+            .unwrap();
+
         let edges = chemicals
             .iter()
             .map(|c| {
@@ -52,10 +62,24 @@ impl<B: Backend> Batcher<B, smiles::Chemical, ChemicalBatch<B>> for ChemicalBatc
                     .smiles
                     .edges
                     .iter()
-                    .map(|&(u, v)| (u as i64, v as i64))
+                    // TODO(saiputravu): overflows, possible?
+                    .map(|&(u, v)| ((u + base) as i64, (v + base) as i64))
                     .unzip();
+
+                // Combine outer lists by flattening.
                 let flat: Vec<i64> = srcs.into_iter().chain(dsts).collect();
-                Tensor::from_data(TensorData::new(flat, [2, num_edges]), device)
+
+                // Increment the base by the number of nodes, so that we have a batch full of
+                // unique node identifiers.
+                base += c.smiles.node_features.len();
+
+                // Compute result tensor, add padding.
+                let mut result = Tensor::from_data(TensorData::new(flat, [2, num_edges]), device);
+                if num_edges < max_num_edges {
+                    let padding = Tensor::zeros([2, max_num_edges - num_edges], device);
+                    result = Tensor::cat(vec![result, padding], 1);
+                }
+                result
             })
             .collect::<Vec<_>>();
 

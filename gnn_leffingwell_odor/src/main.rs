@@ -25,7 +25,22 @@ fn main() {
 
     println!("{model}");
 
-    for el in train.iter().take(4) {
-        println!("{:?}", el);
+    // Test the dataset.
+    for el in train.iter().take(1) {
+        let d = el.edges.to_data();
+        let n = d.shape[1];
+        let collect: Vec<Vec<i32>> = d
+            .to_vec::<i32>()
+            .unwrap()
+            .chunks(n)
+            .map(|r| r.to_vec())
+            .collect();
+
+        for c in collect {
+            println!("{:?}", c);
+        }
+        println!("{:?}", el.edge_features);
+        println!("{:?}", el.node_features);
+        println!("{:?}", el.labels);
     }
 }
