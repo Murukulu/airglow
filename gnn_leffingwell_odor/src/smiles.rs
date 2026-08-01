@@ -16,7 +16,7 @@ pub struct Chemical {
     #[serde(deserialize_with = "deserialize_python_list_one_hot")]
     pub odor_labels_filtered: Vec<usize>,
     #[serde(rename = "labels_train/test")]
-    labels_train_test: f32,
+    pub labels_train_test: f32,
     labels_cv0: f32,
     labels_cv1: f32,
     labels_cv2: f32,
