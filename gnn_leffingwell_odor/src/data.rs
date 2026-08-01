@@ -1,3 +1,5 @@
+use std::ops::Index;
+
 use burn::{data::dataloader::batcher::Batcher, prelude::*, tensor::TensorData};
 
 use crate::smiles;
@@ -10,23 +12,63 @@ pub struct ChemicalBatch<B: Backend> {
     pub edges: Tensor<B, 2, Int>,
     pub node_features: Tensor<B, 2>,
     pub edge_features: Tensor<B, 2>,
-    pub labels: Tensor<B, 2, Int>,
+    pub targets: Tensor<B, 2, Int>,
+    pub batch_idxs: Tensor<B, 1, Int>,
+    pub batch_size: usize,
 }
 
 pub struct LeffingwellDataset {
     dataset: Vec<smiles::Chemical>,
+    pub classes: usize,
 }
 
 impl LeffingwellDataset {
     // init, given a dataset CSV path, generates a vector of chemicals.
     // These chemicals hold the graph representation, labels, and various other features.
     pub fn init(path: &str) -> Result<LeffingwellDataset, csv::Error> {
-        let mut dataset = Vec::new();
+        let mut dataset: Vec<smiles::Chemical> = Vec::new();
         let mut rdr = csv::Reader::from_path(path)?;
         for res in rdr.deserialize() {
             dataset.push(res?);
         }
-        Ok(LeffingwellDataset { dataset })
+        let classes = if dataset.is_empty() {
+            0
+        } else {
+            dataset.index(0).odor_labels_filtered.len()
+        };
+        Ok(LeffingwellDataset { dataset, classes })
+    }
+
+    // labels_train/test == 1.0 marks training rows in the CSV.
+    pub fn train(path: &str) -> Result<LeffingwellDataset, csv::Error> {
+        let full = Self::init(path)?;
+        let dataset: Vec<_> = full
+            .dataset
+            .into_iter()
+            .filter(|c| c.labels_train_test == 1.0)
+            .collect();
+        let classes = if dataset.is_empty() {
+            0
+        } else {
+            dataset[0].odor_labels_filtered.len()
+        };
+        Ok(LeffingwellDataset { dataset, classes })
+    }
+
+    // labels_train/test == 0.0 marks test rows in the CSV.
+    pub fn test(path: &str) -> Result<LeffingwellDataset, csv::Error> {
+        let full = Self::init(path)?;
+        let dataset: Vec<_> = full
+            .dataset
+            .into_iter()
+            .filter(|c| c.labels_train_test == 0.0)
+            .collect();
+        let classes = if dataset.is_empty() {
+            0
+        } else {
+            dataset[0].odor_labels_filtered.len()
+        };
+        Ok(LeffingwellDataset { dataset, classes })
     }
 }
 
@@ -115,11 +157,25 @@ impl<B: Backend> Batcher<B, smiles::Chemical, ChemicalBatch<B>> for ChemicalBatc
             })
             .collect::<Vec<_>>();
 
+        // Generates a identity for each node in the batch for which
+        // chemical it is from.
+        let mut base = 0;
+        let batch = chemicals
+            .iter()
+            .map(|c| {
+                let tens = Tensor::full(Shape::new([c.smiles.node_features.len()]), base, device);
+                base += 1;
+                tens
+            })
+            .collect::<Vec<_>>();
+
         ChemicalBatch {
             edges: Tensor::cat(edges, 0),
             node_features: Tensor::cat(node_features, 0),
             edge_features: Tensor::cat(edge_features, 0),
-            labels: Tensor::cat(labels, 0),
+            targets: Tensor::cat(labels, 0),
+            batch_idxs: Tensor::cat(batch, 0),
+            batch_size: chemicals.len(),
         }
     }
 }
