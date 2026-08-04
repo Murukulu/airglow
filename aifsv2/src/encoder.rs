@@ -2,10 +2,11 @@ use burn::{
     config::Config,
     module::Module,
     nn::{
-        Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig,
+        Dropout, Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig,
         activation::Activation::{self, Gelu},
     },
     prelude::*,
+    serde,
     tensor::backend::Backend,
 };
 
@@ -94,6 +95,86 @@ impl<B: Backend> MultiLayerPreceptron<B> {
     }
 }
 
+// TODO(saiputravu): Clean up these comments.
+// This can be replaced with https://arxiv.org/pdf/2511.11581b
+// (Triton Attention Kernel). This is also an implementation of the
+// pytorch_geometric MessagePassing
+// (https://github.com/pyg-team/pytorch_geometric/blob/cc678a392255a1467872f54582724b8dce434603/torch_geometric/nn/conv/message_passing.py#L39)
+
+#[derive(Config, Debug)]
+pub struct GraphTransformerConvConfig {
+    out_channels: usize,
+    dropout: f64,
+
+    aggr_type: String, // TODO(saiputravu): This should be an enum...
+    flow: String,      // TODO(saiputravu): This should be an enum...
+    node_dim: usize,
+    fuse: bool,
+
+    // Feature decomp. paper: https://arxiv.org/abs/2104.03058
+    #[config(default = 1)]
+    decomposed_layers: usize,
+}
+
+#[derive(Module, Debug)]
+pub struct GraphTransformerConv<B: Backend> {
+    dropout: Dropout,
+    // FIXME(saiputravu):
+    fuse: bool,
+    decomposed_layers: usize,
+}
+
+impl GraphTransformerConvConfig {
+    fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerConv<B> {
+        GraphTransformerConv {
+            dropout: Dropout { prob: self.dropout },
+            linear_dummy: LinearConfig::new(0, 0).init(device),
+            fuse: self.fuse,
+            decomposed_layers: self.decomposed_layers,
+        }
+    }
+}
+
+struct Adj<B: Backend, const D: usize> {
+    adj_t: Tensor<B, D>,
+    e_id: Option<Tensor<B, D>>,
+    size: (usize, usize),
+}
+
+impl<B: Backend> GraphTransformerConv<B> {
+    // https://github.com/pyg-team/pytorch_geometric/blob/cc678a392255a1467872f54582724b8dce434603/torch_geometric/nn/aggr/basic.py#L12
+    fn sum_forward<const D: usize>(&self, x: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
+        x.sum_dim(dim)
+    }
+
+    // Message propagation.
+    fn propagate<const D: usize>(
+        &self,
+        edge_index: Adj<B, D>,
+        size: Option<usize>,
+    ) -> Tensor<B, D> {
+        if self.fuse {
+            let out = self.message_and_aggregate(edge_index);
+            let out = self.update(out);
+            return out;
+        } else {
+            let mut decomp_out: Vec<Tensor<B, D>> = Vec::default();
+            // Else run both functions in separation?
+            // TODO(saiputravu): Do some reading on fused vs. non-fused.
+            for i in 0..self.decomp {
+                let out = self.message(..);
+                let out = self.aggregate(out);
+                let out = self.update(out);
+                decomp_out.push(out);
+            }
+            // FIXME(saiputravu): Fix this sloppy mess.
+            return Tensor::cat(decomp_out, decomp_out[0].shape()[-1]);
+        }
+    }
+
+    fn forward() {}
+}
+
 #[derive(Config, Debug)]
 pub struct GraphTransformerMapperBlockConfig {
     in_channels: usize,
@@ -106,6 +187,8 @@ pub struct GraphTransformerMapperBlockConfig {
     qk_norm: bool,
     edge_pre_mlp: bool,
     bias: bool,
+
+    conv_dropout: f64,
     // TODO(saiputravu): Think about other parameters.
 }
 
@@ -132,11 +215,18 @@ pub struct GraphTransformerMapperBlock<B: Backend> {
 
     // Edge pre-processing.
     edge_pre_mlp: Option<MultiLayerPreceptron<B>>,
+
+    conv: GraphTransformerConv<B>,
 }
 
 impl GraphTransformerMapperBlockConfig {
-    fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerMapperBlock<B> {
+    fn out_channels_conv(&self) -> usize {
         let out_channels_conv = self.attn_channels / self.num_heads;
+        out_channels_conv
+    }
+
+    fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerMapperBlock<B> {
+        let out_channels_conv = self.out_channels_conv();
         let lin_key =
             LinearConfig::new(self.in_channels, self.num_heads * out_channels_conv).init(device);
         let lin_query =
@@ -170,9 +260,17 @@ impl GraphTransformerMapperBlockConfig {
         );
         let node_src_mlp = ();
         let edge_pre_mlp = if self.edge_pre_mlp {
+            Some(
+                MultiLayerPreceptronConfig::new(self.edge_dim, self.edge_dim, 0, 0, false)
+                    .with_final_activation(true)
+                    .init(device),
+            )
         } else {
             None
         };
+        // FIXME(saiputravu): Correct the dropout.
+        let conv = GraphTransformerConvConfig::new(out_channels_conv, self.conv_dropout);
+
         GraphTransformerMapperBlock {
             lin_key,
             lin_query,
@@ -188,6 +286,7 @@ impl GraphTransformerMapperBlockConfig {
             node_dst_mlp,
             node_src_mlp,
             edge_pre_mlp,
+            conv,
         }
     }
 }
