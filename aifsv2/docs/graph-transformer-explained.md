@@ -40,11 +40,13 @@ Both upstreams name it in the class docstring, so this is not an inference:
 
 UniMP's operator, as PyG transcribes it (`transformer_conv.py:31-41`):
 
-```
+$$
 alpha_{i,j} = softmax_{j in N(i)} ( (W3 x_i)^T (W4 x_j) / sqrt(d) )
+$$
 
+$$
 x'_i = W1 x_i + sum_{j in N(i)} alpha_{i,j} W2 x_j
-```
+$$
 
 Read `i` as the **destination** node and `j` as a **source** node feeding it. `N(i)` is the set of
 sources with an edge into `i` — the sum runs over that set, not over all nodes. This is the entire
