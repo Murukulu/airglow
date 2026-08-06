@@ -1,99 +1,12 @@
 use burn::{
     config::Config,
     module::Module,
-    nn::{
-        Dropout, Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig,
-        activation::Activation::{self, Gelu},
-    },
+    nn::{Dropout, LayerNorm, LayerNormConfig, Linear, LinearConfig},
     prelude::*,
-    serde,
     tensor::backend::Backend,
 };
 
-// TODO(saiputravu): Move common modules to ./common.rs
-
-type PairTensor<B: Backend, const D: usize> = (Tensor<B, D>, Tensor<B, D>);
-
-#[derive(Config, Debug)]
-pub struct MultiLayerPreceptronConfig {
-    in_features: usize,
-    out_features: usize,
-    hidden_dim: usize,
-    n_extra_layers: usize,
-    layer_norm: bool,
-    #[config(default = false)]
-    final_activation: bool,
-}
-
-// Note: This is a lazy implementation of the MLP implemented in Anemoi.
-// We fix the activation to be GELU, as that is what it is in AIFS' MLP
-// layers.
-#[derive(Module, Debug)]
-pub struct MultiLayerPreceptron<B: Backend> {
-    layers: Vec<Linear<B>>,
-    activation: Activation<B>,
-    layer_norm: Option<LayerNorm<B>>,
-    final_activation: bool,
-}
-
-impl MultiLayerPreceptronConfig {
-    fn init<B: Backend>(&self, device: &B::Device) -> MultiLayerPreceptron<B> {
-        // Compute the linear layers (first + hidden + last).
-        let mut layer_confs = vec![LinearConfig::new(self.in_features, self.hidden_dim)];
-        if self.n_extra_layers != 0 {
-            layer_confs.extend(vec![LinearConfig::new(self.hidden_dim, self.hidden_dim)]);
-        }
-        layer_confs.push(LinearConfig::new(self.hidden_dim, self.out_features));
-
-        // Initialise the linear layers.
-        let layers = layer_confs.iter().map(|c| c.init(device)).collect();
-
-        // Setup layer norm, if we are using it.
-        let layer_norm = if self.layer_norm {
-            Some(LayerNormConfig::new(self.out_features).init(device))
-        } else {
-            None
-        };
-
-        MultiLayerPreceptron {
-            layers,
-            final_activation: self.final_activation,
-            // Fix GELU, which is kind of hacky.
-            activation: Gelu(Gelu { approximate: false }),
-            layer_norm,
-        }
-    }
-
-    fn build_hidden_layers<B: Backend>(
-        &self,
-        in_features: usize,
-        out_features: usize,
-        n_layers: usize,
-        device: &B::Device,
-    ) -> Vec<Linear<B>> {
-        vec![LinearConfig::new(in_features, out_features).init(device); n_layers]
-    }
-}
-impl<B: Backend> MultiLayerPreceptron<B> {
-    fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        let mut x = input;
-
-        // Apply all layers, with the activation method.
-        for (i, l) in self.layers.iter().enumerate() {
-            x = l.forward(x);
-            if i != self.layers.len() - 1 || self.final_activation {
-                x = self.activation.forward(x);
-            }
-        }
-
-        // Return the final tensor, applying the layer norm, if specified.
-        if let Some(layer_norm) = &self.layer_norm {
-            layer_norm.forward(x)
-        } else {
-            x
-        }
-    }
-}
+use crate::common;
 
 // TODO(saiputravu): Clean up these comments.
 // This can be replaced with https://arxiv.org/pdf/2511.11581b
@@ -141,18 +54,25 @@ struct Adj<B: Backend, const D: usize> {
     size: (usize, usize),
 }
 
-impl<B: Backend> GraphTransformerConv<B> {
-    // https://github.com/pyg-team/pytorch_geometric/blob/cc678a392255a1467872f54582724b8dce434603/torch_geometric/nn/aggr/basic.py#L12
-    fn sum_forward<const D: usize>(&self, x: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
-        x.sum_dim(dim)
+// https://pytorch-geometric.readthedocs.io/en/2.6.0/notes/create_gnn.html#the-messagepassing-base-class
+pub trait MessagePassing<B: Backend, const D: usize> {
+    fn aggregate(&self, x: Tensor<B, D>, dim: usize) -> Tensor<B, D>;
+    fn propagate(&self, edge_index: Adj<B, D>, size: Option<usize>) -> Tensor<B, D>;
+}
+
+// https://github.com/pyg-team/pytorch_geometric/blob/cc678a392255a1467872f54582724b8dce434603/torch_geometric/nn/aggr/basic.py#L12
+fn sum_forward<B: Backend, const D: usize>(x: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
+    x.sum_dim(dim)
+}
+
+// GraphTransformerConv: https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.conv.TransformerConv.html
+impl<B: Backend, const D: usize> MessagePassing<B, D> for GraphTransformerConv<B> {
+    fn aggregate(&self, x: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
+        sum_forward(x, dim)
     }
 
     // Message propagation.
-    fn propagate<const D: usize>(
-        &self,
-        edge_index: Adj<B, D>,
-        size: Option<usize>,
-    ) -> Tensor<B, D> {
+    fn propagate(&self, edge_index: Adj<B, D>, size: Option<usize>) -> Tensor<B, D> {
         if self.fuse {
             let out = self.message_and_aggregate(edge_index);
             let out = self.update(out);
@@ -172,7 +92,7 @@ impl<B: Backend> GraphTransformerConv<B> {
         }
     }
 
-    fn forward() {}
+    // fn forward() {}
 }
 
 #[derive(Config, Debug)]
@@ -210,7 +130,7 @@ pub struct GraphTransformerMapperBlock<B: Backend> {
     layer_norm_attention: LayerNorm<B>,
     layer_norm_mlp_dst: Option<LayerNorm<B>>,
 
-    node_dst_mlp: MultiLayerPreceptron<B>,
+    node_dst_mlp: common::MultiLayerPreceptron<B>,
     node_src_mlp: Option<MultiLayerPreceptron<B>>,
 
     // Edge pre-processing.
