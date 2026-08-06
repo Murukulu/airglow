@@ -735,7 +735,7 @@ The duplicates **are** the segments. They are not an artifact to be designed aro
   duplicates, so its segments are uniformly sized (§2b). Same mechanism, fixed group size.
 
 If those three writes are issued by three threads with a non-atomic read-modify-write, two of them
-are lost. That is the entire subject of §8, and of §5 Step 4 of the design note.
+are lost. That is the entire subject of §8-§9, and of §5 Step 4 of the design note.
 
 ---
 
@@ -814,7 +814,165 @@ follow-up 2 in the design note.
 
 ---
 
-## 8. Does PyTorch race?
+## 8. How scatter works
+
+Everything in §6 is **three gathers and one scatter**. Gather and scatter are inverses of each
+other, and the difference between them is the source of every difficulty in this port — so it is
+worth being precise about what each one does.
+
+### 8a. Gather reads at indices
+
+A gather takes a list of positions and produces the values found there. `Tensor::select(dim,
+indices)`, `burn-tensor-0.21.0/src/tensor/api/base.rs:1641`, with a **1-D** index list:
+
+```
+output[i, j, k] = input[indices[i], j, k]        // dim = 0
+```
+
+Using `src = [0, 1, 3, 2, 0, 2, 3]` from §6 to gather rows of `value`:
+
+```
+value  [N_src = 4]         v_j  [E = 7]   =   value.select(0, src)
+------------------         -------------------------------------------
+ row 0 : (10,  0)  <----    e=0   src[0]=0  ->  (10,  0)
+ row 1 : ( 0, 10)  <----    e=1   src[1]=1  ->  ( 0, 10)
+ row 2 : ( 5,  5)           e=2   src[2]=3  ->  ( 1,  1)
+ row 3 : ( 1,  1)           e=3   src[3]=2  ->  ( 5,  5)
+                            e=4   src[4]=0  ->  (10,  0)   <- row 0, read again
+                            e=5   src[5]=2  ->  ( 5,  5)   <- row 2, read again
+                            e=6   src[6]=3  ->  ( 1,  1)   <- row 3, read again
+```
+
+Two properties make gather easy:
+
+- **Every output cell is written exactly once.** The output has one row per index, in order.
+- **Duplicate indices are free.** `src[0]` and `src[4]` are both `0`; row 0 of `value` is simply
+  read twice. Concurrent reads of the same address never conflict.
+
+Shape goes `[N_src, …] → [E, …]`. It moves data _into_ the edge domain.
+
+### 8b. Scatter writes at indices — and loses both properties
+
+A scatter is the same index list used in the opposite direction: for each element of `values`,
+write it to the position named by `indices`. `Tensor::select_assign(dim, indices, values, update)`,
+`base.rs:1673`:
+
+```
+input[indices[i], j, k] += values[i, j, k]       // dim = 0
+```
+
+Same `dst = [0, 0, 0, 1, 2, 2, 2]`, running the other way:
+
+```
+  msg  [E = 7]                          out  [N_dst = 3]   (initialised to zeros)
+  -------------------------------       -----------------------------------------
+   e=0  (2.840, 0.000)  dst[0]=0  --+
+   e=1  (0.000, 1.400)  dst[1]=0  --+-->  out[0] = (3.416, 1.976)    3 writes
+   e=2  (0.576, 0.576)  dst[2]=0  --+
+
+   e=3  (5.000, 5.000)  dst[3]=1  ---->  out[1] = (5.000, 5.000)     1 write
+
+   e=4  (1.980, 0.000)  dst[4]=2  --+
+   e=5  (2.005, 2.005)  dst[5]=2  --+-->  out[2] = (4.386, 2.406)    3 writes
+   e=6  (0.401, 0.401)  dst[6]=2  --+
+```
+
+Neither property survives:
+
+| How many times a cell is written                     | Consequence                                                                           |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **0** — no edge names it (a zero-degree destination) | the output needs a defined starting value; scatter cannot invent one                  |
+| **1**                                                | the easy case                                                                         |
+| **many** — 18.6 on average here                      | the writes must be _combined_, and the combining rule has to be part of the operation |
+
+That is why the API is `Tensor::zeros(…).select_assign(…, Add)` rather than a bare scatter. The
+`zeros` supplies the answer for degree 0; `Add` supplies it for degree > 1.
+
+### 8c. Why the update op cannot be `Assign`
+
+The combining rule is not a stylistic choice. For a scatter to be **well defined** it must not
+depend on the order the writes happen to arrive, and for cells nobody writes it must still produce
+something. Formally the rule has to be a commutative monoid — an associative, commutative operator
+with an identity element:
+
+| Op       | Identity | Associative & commutative? | Well defined on duplicates?                        |
+| -------- | -------- | -------------------------- | -------------------------------------------------- |
+| `Add`    | `0`      | yes                        | **yes**                                            |
+| `Mul`    | `1`      | yes                        | yes                                                |
+| `Min`    | `+inf`   | yes                        | yes                                                |
+| `Max`    | `−inf`   | yes                        | yes                                                |
+| `Assign` | — none   | **no**                     | **no** — the result is whichever write landed last |
+
+`Assign` with duplicate indices has no defined answer at all: three edges naming `out[0]` would
+each claim it, and nothing in the problem statement says which wins. It is only meaningful when the
+indices are unique.
+
+This is also why aggregation in message passing is _always_ sum, mean, min or max, never
+assignment — anemoi's `aggr="add"` (`conv.py:97`) is picking an element from that table. §7's
+softmax is what makes `add` the right pick: the weights already sum to 1, so summation produces a
+weighted average.
+
+### 8d. Burn 0.21 has three gather/scatter pairs, differing only in how indices address
+
+| Gather                | Scatter                   | Addressing                                           | Index shape                       | Index shape _for our case_ |
+| --------------------- | ------------------------- | ---------------------------------------------------- | --------------------------------- | -------------------------- |
+| `select` (`:1641`)    | `select_assign` (`:1673`) | **axis** — one index per slice along `dim`           | `[n]`, always 1-D                 | `[E]` → **6 MB**           |
+| `gather` (`:1766`)    | `scatter` (`:1804`)       | **element** — one index per element                  | same rank _and_ shape as `values` | `[E, H, C]` → **6.1 GB**   |
+| `gather_nd` (`:1883`) | `scatter_nd` (`:1853`)    | **slice** — `K` indices address the leading `K` dims | `[…, K]`                          | `[E, 1]` → **6 MB**        |
+
+All three express our aggregation. They differ in what they cost and what they permit:
+
+- **`select_assign`** — what the port uses. `indices` is `dst` itself, `[E]`, and `values` is the
+  full-rank `[E, H, C]` message tensor. The 1-D index is the cheap part.
+- **`scatter`** — element-addressed, so scattering `[E, H, C]` messages requires an `[E, H, C]`
+  i64 index tensor: the same index repeated `H·C = 1024` times per edge, **≈ 6.1 GB**. Ruled out on
+  memory alone.
+- **`scatter_nd`** — `K = 1` indexes only dim 0, so `[E, 1]` suffices and `values` keeps the
+  trailing dims. Cheap, and the only one of the three that accepts an update op other than `Add`
+  (`scatter` panics otherwise, per its own docstring at `base.rs:1802-1803`). It is nonetheless the
+  wrong choice here, for a reason that has nothing to do with shapes — §9.
+
+### 8e. The call this port makes
+
+```rust
+Tensor::zeros([n_dst, h, c], dev)
+    .select_assign(0, dst, msg, IndexingUpdateOp::Add)
+```
+
+Read against Burn's own specification at `base.rs:1664`:
+
+```
+input[indices[i], j, k] += values[i, j, k]        // dim = 0
+
+  input   = zeros [N_dst, H, C]      the accumulator
+  indices = dst   [E]                indices[e] is the destination of edge e
+  values  = msg   [E, H, C]          values[e] is the message on edge e
+  ⇒  out[dst[e], h, c] += msg[e, h, c]     for every e, h, c
+```
+
+`i` ranges over `E`, and `dst[e]` collides for ~18.6 values of `e`. That collision is not
+incidental — it is what performs the sum over `j ∈ N(i)` in §1a's equation.
+
+### 8f. Burn documents the duplicate case, and it is not reassuring
+
+From `scatter_nd`'s docstring, `base.rs:1840-1847`, verbatim:
+
+> When `indices` contains duplicate entries, behavior varies by operation:
+>
+> - For `Add`, accumulation is supported, though results may be non-deterministic on GPU backends.
+> - For other operations (`Assign`, `Mul`, `Min`, `Max`), duplicate indices result in undefined
+>   behavior for both the forward result and the backward gradients.
+>
+> For deterministic results and correct gradient calculation across all operations, `indices` should
+> contain unique entries.
+
+Duplicate indices are our _entire workload_ — the mean destination has 18.6 of them (§6c) — so
+"indices should contain unique entries" is advice this layer cannot take. The upstream warning is
+therefore load-bearing, and §9 works out what it actually means at the kernel level.
+
+---
+
+## 9. Does PyTorch race?
 
 PyG computes the per-segment maximum with `scatter`, `_softmax.py:84`:
 
@@ -853,7 +1011,7 @@ out_sum = scatter(out, index, dim, dim_size=N, reduce="sum") + 1e-16
 That is the missing half of the design note's argument. The hazard is identical; the resolution is
 not.
 
-### 8a. Correct versus reproducible
+### 9a. Correct versus reproducible
 
 Two different properties, and they come apart:
 
@@ -884,7 +1042,7 @@ The fourth row is worth stating plainly: **Burn's `select_assign` is _more_ repr
 PyTorch's `scatter_add_`**, and pays for it in parallelism — 1024 threads each walking all 748,348
 edges. That is the exact trade §5 Step 4 of the design note makes.
 
-### 8b. What this means for the port
+### 9b. What this means for the port
 
 - **Duplicates are not the problem. Non-atomicity is.** PyG does not avoid duplicate indices; it
   relies on a kernel that handles them.
@@ -904,7 +1062,7 @@ edges. That is the exact trade §5 Step 4 of the design note makes.
 
 ---
 
-## 9. Glossary
+## 10. Glossary
 
 | Symbol   | Domain                         | Meaning                                                                                  |
 | -------- | ------------------------------ | ---------------------------------------------------------------------------------------- |
@@ -932,7 +1090,8 @@ edges. That is the exact trade §5 Step 4 of the design note makes.
 - **§3** — the two anemoi reference implementations (PyG and Triton) and what each reveals.
 - **§4** — checkpoint tensor inventory and the parameter shapes.
 - **§5 Step 3-4** — `EdgeIndex` and `graph_transformer_conv`, with the full `scatter_nd` /
-  `select_assign` / `segment_softmax` argument this document's §8 supplies the PyTorch half of.
+  `select_assign` / `segment_softmax` argument this document's §8-§9 supply the mechanics and
+  the PyTorch half of.
 - **§8** — the CubeCL segmented kernel follow-up, which removes both the global-max compromise and
   the 1024-thread bottleneck.
 
