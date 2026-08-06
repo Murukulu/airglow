@@ -318,6 +318,58 @@ Three sizes, three meanings, no arithmetic relationship forced between them:
 `E` is set by geometry. It could legally be anything from `0` to `N_src × N_dst`; the cutoff radius
 happens to yield 748,348.
 
+### 3b. `E` is a count; `e` is a name
+
+`748,348` is **not an edge**. It is how many edges there are. Every edge is still a pair — that
+never stops being true. Two distinct things are easy to conflate here:
+
+|                           | What it is                                     | Example                                            |
+| ------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| **Definition** of an edge | a pair `(src[e], dst[e])`                      | `(4127, 0)` — from data node 4127 to hidden node 0 |
+| **Identity** of an edge   | a single integer `e`, its position in the list | `0`                                                |
+
+Every edge is _defined_ by two numbers and _named_ by one. The name is just its column index in
+the §3a table — an arbitrary label handed out by build order, `e ∈ [0, 748348)`. Exactly like a row
+number in a spreadsheet of `(from, to)` pairs: "row 5" identifies the row, `(4127, 0)` is what the
+row says.
+
+That is what makes `[748348, 8]` sensible. Anything attached _to an edge_ is stored as a table with
+one row per edge, addressed by `e`:
+
+```
+model.encoder.trainable.trainable  [748348, 8]
+
+     e        8 learned features
+  ------   ----------------------
+     0     [ ................ ]     <- belongs to edge (src[0], dst[0]) = (4127, 0)
+     1     [ ................ ]     <- belongs to edge (886, 0)
+    ...
+  748347   [ ................ ]
+```
+
+`src`, `dst` and this feature table are three columns of one conceptual table, all keyed by `e`.
+
+### 3c. Where `E` comes from: it counts nonzeros
+
+The other way to see it. A bipartite graph is a boolean matrix `A` of shape `[N_src, N_dst]`, with
+`A[s, d] = 1` when an edge exists:
+
+```
+          d=0    d=1    d=2   ...    d=40319
+    s=0  [  1      0      1   ...       0   ]
+    s=1  [  1      0      0   ...       0   ]     542,080 x 40,320
+    ...                                          = 21,856,665,600 cells
+s=542079 [  0      0      0   ...       1   ]
+```
+
+`E` is the number of `1`s. For this graph that is 748,348 out of 21.86 billion — a density of
+**0.0034%**, so 99.9966% of the matrix is zero. Storing it densely would cost ~87 GB in f32;
+storing only the coordinates of the nonzeros costs 12 MB for `src` + `dst` in i64.
+
+That is what COO — **coordinate** format — means, and it is why `E` is an independent number.
+`N_src` and `N_dst` fix the matrix's _shape_; `E` is how many cells the cutoff rule happened to
+switch on. Nothing forces a relationship between the three.
+
 ---
 
 ## 4. `EdgeIndex`: COO and CSC, and why `colptr` is there
