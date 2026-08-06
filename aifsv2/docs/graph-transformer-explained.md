@@ -216,6 +216,47 @@ Derived encoder degrees:
 The second number says most data points fall inside exactly one hidden node's ball, and a minority
 fall inside two — consistent with balls of radius `0.6 ×` spacing overlapping slightly.
 
+### 2c. What the `8` is, and why the feature counts close
+
+Each of those four tensors is a **lookup table, not a projection**: an `nn.Parameter` of shape
+`[count, 8]` indexed by node id or edge id, so entity `n` owns row `n` — a learned embedding for
+that specific grid point or that specific edge. The width is configured, not derived:
+`config.model.trainable_parameters = {"data": 8, "hidden": 8}`, plus `trainable_size: 8` for edges.
+
+Those 8 channels are concatenated with the physical inputs before the embedding, which is why the
+`emb_nodes_*` shapes in §4 of the design note come out as they do. Both sides reconcile exactly:
+
+```
+model.node_attributes.latlons_hidden   [40320, 4]     geometry
+model.node_attributes.…hidden.trainable[40320, 8]     learned
+                                              --
+                                              12   =  emb_nodes_dst.weight [1024, 12]  ✓
+
+  106 model input variables  ×  2 timesteps        =  212      (multistep_input: 2)
++ latlons_data       [542080, 4]                   +   4
++ …data.trainable    [542080, 8]                   +   8
+                                                     ---
+                                                     224   =  emb_nodes_src.weight [1024, 224]  ✓
+```
+
+`106` is `data_indices.model.input.full` (92 prognostic + 14 forcing; the 28 diagnostic variables
+are output-only, so they are not inputs). The hidden side has **no** physical variables at all —
+only geometry and learned state, which is what makes it "hidden."
+
+The `latlons_*` tensors are a trigonometric encoding of position, not raw degrees: every row of
+`latlons_hidden` has `sum(x²) == 2.0` exactly, and channels `(0, 2)` and `(1, 3)` each form a unit
+vector — two angles, interleaved.
+
+The same pattern holds one level down, for edges: `model.encoder.trainable.trainable [748348, 8]`
+is per-edge, and `8 + 1 (edge_length) + 2 (edge_dirs) = 11 = lin_edge.weight [1024, 11]`. Nodes and
+edges are treated identically — geometry plus a learned per-entity vector, embedded to
+`hidden_dim`.
+
+> **`N_src` and `N_dst` are roles, not identities.** They name a position in the encoder's
+> bipartite graph. The `data` node set is the source there and the **destination** in the decoder
+> (`KNNEdges`, `hidden → data`), where the counts swap. `542,080` is a property of the N320 grid;
+> being "source" is a property of which mapper you are looking at.
+
 > **What we cannot state.** `edge_index` itself is **not** in the checkpoint —
 > `parse_safetensors.py --query index` returns nothing. It is a non-persistent buffer loaded from
 > `graph_enc_proc_dec_n320.pt` (`config.hardware.files.graph`), which this repo does not have. So
