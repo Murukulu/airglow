@@ -826,6 +826,69 @@ It **has** to be a single number, for two reasons that both come from downstream
 So the `C` axis serves its purpose during the comparison and is then deliberately destroyed. It
 reappears in step 6 only because `v_j` still has it.
 
+#### The paper writes `qᵀk`, and that is the same operation
+
+UniMP's Eq. 3 (p. 4) does write a transpose, which reads like a matrix product:
+
+```
+                     ⟨ q_{c,i}, k_{c,j} + e_{c,ij} ⟩
+   α_{c,ij}  =  ────────────────────────────────────────
+                Σ_{u ∈ N(i)}  ⟨ q_{c,i}, k_{c,u} + e_{c,iu} ⟩
+
+   where  ⟨q, k⟩ = exp( qᵀk / √d )
+```
+
+It is not a matrix product, and the paper says so two sentences later:
+
+> For the `c`-th head attention, we firstly transform the source feature `h_i` and distant feature
+> `h_j` into **query vector `q_{c,i} ∈ R^d`** and **key vector `k_{c,j} ∈ R^d`** respectively […]
+
+`q` and `k` are **vectors in `R^d`**, not matrices. Under the usual convention that an unadorned
+vector is a column, `qᵀ` is `1 × d`, `k` is `d × 1`, and `qᵀk` is `1 × 1` — a scalar. `qᵀk` is
+simply how linear algebra spells a dot product; the transpose is shape bookkeeping, not an
+instruction to call a matmul. The paper's own `⟨·,·⟩` — standard inner-product notation — says the
+same thing.
+
+Three tells that no matrix is involved, all visible in the equation itself:
+
+| Tell                              | What it means                                                                                                               |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `q, k ∈ R^d`                      | operands are vectors; `qᵀk` is `1×1`                                                                                        |
+| `α` is subscripted `c,ij`         | **one scalar per (head `c`, edge `(i,j)`)** — the paper indexes a specific pair, never a matrix of all pairs                |
+| the denominator is `Σ_{u ∈ N(i)}` | normalisation runs over `i`'s **neighbours**, not over all nodes — this is §7i's segment softmax, written out in the source |
+
+Compare with Vaswani et al., which writes `softmax(QKᵀ/√d)V` with **capital** `Q, K`. Those really
+are matrices (`Q ∈ R^{n×d}`), `QKᵀ` really is a matmul, and it produces an `n × m` matrix of
+scores — every query against every key. **The capitalisation is the tell.** UniMP uses lowercase
+because it is describing one pair at a time.
+
+So `qᵀk` and `(q_i * k_j).sum_dim(-1)` compute the identical quantity. The code differs from the
+formula only in that it evaluates that formula `E · H` times at once: in code there is no single
+`q`, there is `q_i` of shape `[E, H, C]` — a _batch_ of `E · H` vectors — and elementwise-multiply
+then sum-the-last-axis is how you apply a vector formula across a batch.
+
+The trap is treating `matmul` as "the operation that computes a dot product." It is not. It is the
+operation that computes a **whole matrix of dot products**, every row of the left against every
+column of the right. That is the right tool when you want all pairs, and the wrong one when the
+pairs have already been chosen — §7d.
+
+#### PyG does the same, for the same reason
+
+`torch_geometric/nn/conv/transformer_conv.py:273`, character for character what anemoi has at
+`conv.py:142`:
+
+```python
+alpha = (query_i * key_j).sum(dim=-1) / math.sqrt(self.out_channels)
+```
+
+The `_i` and `_j` suffixes are the whole explanation. By the time `message()` runs, PyG's `_collect`
+has already gathered along the edge list (§8a), so `query_i[e]` and `key_j[e]` are the query and
+key **of the same edge**. The pairing is finished. An all-pairs operation has nothing left to
+contribute, and `matmul` is an all-pairs operation.
+
+Put differently: `MessagePassing` exists precisely to turn "attention over a graph" into "a batch
+of `E` independent scalar problems." Having done that, the arithmetic that remains is elementwise.
+
 ### 7d. The `[E, H, H]` that never gets built
 
 If step 4 were a matrix product, what would it produce? This is worth working out, because the
