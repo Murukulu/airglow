@@ -739,9 +739,204 @@ are lost. That is the entire subject of §8-§9, and of §5 Step 4 of the design
 
 ---
 
-## 7. What `alpha` is, and what "segment" means
+## 7. The attention computation, step by step
 
-### 7a. Shape at every line
+§6 ran numbers through the layer. This section is about the tensor algebra: what each axis is for,
+which one gets contracted, and why the one operation that looks like it should be a matrix product
+is not one.
+
+### 7a. The six steps at a glance
+
+| # | Operation                               | In                   | Out             | Axis that changes         |
+| - | --------------------------------------- | -------------------- | --------------- | ------------------------- |
+| 1 | `query.select(0, dst)`                  | `[N_dst, H, C]`      | `[E, H, C]`     | node → edge               |
+| 2 | `key.select(0, src) + edges`            | `[N_src, H, C]`      | `[E, H, C]`     | node → edge               |
+| 3 | `value.select(0, src) + edges`          | `[N_src, H, C]`      | `[E, H, C]`     | node → edge               |
+| 4 | `(q_i * k_j).sum_dim(-1) * norm`        | `[E, H, C]` ×2       | `[E, H, 1]`     | **`C` contracted away**   |
+| 5 | `segment_softmax(alpha, dst)`           | `[E, H, 1]`          | `[E, H, 1]`     | none — values only        |
+| 6 | `v_j * alpha`                           | `[E,H,C]`, `[E,H,1]` | `[E, H, C]`     | `C` restored by broadcast |
+| 7 | `zeros.select_assign(0, dst, msg, Add)` | `[E, H, C]`          | `[N_dst, H, C]` | edge → node               |
+
+Steps 1-3 and 7 move data between domains and are covered in §8. Steps 4-6 are the arithmetic.
+
+### 7b. Steps 1-3 — what the gathers buy
+
+The gathers do all the pairing work. After step 3, row `e` of `q_i`, `k_j` and `v_j` all describe
+**the same edge** — `q_i[e]` is the query of that edge's destination, `k_j[e]` the key of its
+source. Three tensors that started in two different domains are now aligned index-for-index.
+
+That alignment is what makes step 4 trivial. There is no "which query goes with which key" left to
+work out; it was decided by the edge list. Everything downstream is elementwise along `E`.
+
+### 7c. Step 4 — an elementwise product, then a sum over `C`
+
+```rust
+let alpha = (q_i * k_j).sum_dim(-1) * norm;   // [E,H,C] -> [E,H,C] -> [E,H,1]
+```
+
+`q_i * k_j` is the **Hadamard (elementwise) product**, not a matrix product. Two `[E, H, C]`
+tensors go in, one `[E, H, C]` tensor comes out, with `out[e,h,c] = q_i[e,h,c] * k_j[e,h,c]`. No
+axis is contracted; nothing is summed yet.
+
+The contraction is the separate `sum_dim(-1)`. Together the two operations are a **dot product**,
+because that is all a dot product is:
+
+```
+a · b  =  sum over c of  a[c] * b[c]        multiply elementwise, then add up
+```
+
+Written as scalar loops, the whole of step 4 is:
+
+```
+for e in 0..E:                     // 748,348 edges   — independent
+    for h in 0..H:                 //      16 heads   — independent
+        s = 0.0
+        for c in 0..C:             //      64 channels — SUMMED
+            s += q_i[e,h,c] * k_j[e,h,c]
+        alpha[e,h,0] = s * norm
+```
+
+Three axes, two distinct roles:
+
+| Axis | Size    | Role           | Why                                                    |
+| ---- | ------- | -------------- | ------------------------------------------------------ |
+| `E`  | 748,348 | **batch**      | each edge's score is independent of every other edge's |
+| `H`  | 16      | **batch**      | heads are separate subspaces and never interact        |
+| `C`  | 64      | **contracted** | it is the feature dimension _inside_ one head          |
+
+#### Why `C` is the one that gets summed
+
+`q_i[e,h,:]` is a 64-number vector describing what the destination of edge `e` is looking for, in
+head `h`. `k_j[e,h,:]` describes what the source offers, in the same head. The dot product measures
+how well they line up — geometrically `q · k = |q| |k| cos θ`, large and positive when the two
+vectors point the same way.
+
+Summing over `C` collapses "how aligned are these two 64-dimensional vectors" into a single number.
+That number is the attention logit.
+
+It **has** to be a single number, for two reasons that both come from downstream:
+
+- **Softmax needs a scalar per candidate.** Step 5 normalises the ~18.6 edges into one destination
+  so their weights sum to 1. "Sum to 1" is only meaningful for scalars.
+- **Step 6 weights the whole message.** `msg = v_j * alpha` scales all `C` channels of `v_j` by the
+  same factor. If `alpha` kept its `C` axis you would have a per-channel gate, not attention — a
+  different operator, and one for which "weights over a destination's edges sum to 1" has no
+  meaning.
+
+So the `C` axis serves its purpose during the comparison and is then deliberately destroyed. It
+reappears in step 6 only because `v_j` still has it.
+
+### 7d. The `[E, H, H]` that never gets built
+
+If step 4 were a matrix product, what would it produce? This is worth working out, because the
+answer explains why it is not one.
+
+Burn's `matmul` contracts the **last** axis of the left operand with the **second-to-last** of the
+right, treating all leading axes as batch (`burn-tensor-0.21.0/src/tensor/api/numeric.rs:915`; the
+inner-dimension check is `check.rs:534-566`). `q_i` and `k_j` are both `[E, H, C]`, so
+`q_i.matmul(k_j)` does not even typecheck — `C ≠ H`. You would have to transpose:
+
+```rust
+q_i.matmul(k_j.swap_dims(1, 2))     // [E,H,C] @ [E,C,H]  ->  [E,H,H]
+```
+
+That **does** produce `E` matrices of shape `[H, H]` — the thing the shapes seem to invite. Its
+entries are:
+
+```
+out[e, h1, h2] = sum over c of  q_i[e, h1, c] * k_j[e, h2, c]
+
+                 = "head h1's query, dotted against head h2's key"
+```
+
+```
+        for one edge e:              h2=0   h2=1   h2=2  ...  h2=15
+                             h1=0  [  ✓      ✗      ✗    ...    ✗  ]
+                             h1=1  [  ✗      ✓      ✗    ...    ✗  ]
+                             h1=2  [  ✗      ✗      ✓    ...    ✗  ]
+                              ...
+                             h1=15 [  ✗      ✗      ✗    ...    ✓  ]
+
+        ✓ = the diagonal, h1 == h2  -> exactly alpha[e, h]
+        ✗ = a query from one head meeting a key from another
+```
+
+**The diagonal is precisely what we want, and everything else is meaningless.** Multi-head
+attention keeps the heads in separate subspaces on purpose: head 0's query has no relationship to
+head 7's key, and mixing them would defeat the point of having heads at all. `H` is a batch axis,
+not something to contract over — which is also why no `[H, H]` object appears anywhere in
+multi-head attention, dense or sparse.
+
+Computing it and taking the diagonal would work, and would waste a factor of `H`:
+
+|                                  | MACs                           | Materialised tensor (f32) |
+| -------------------------------- | ------------------------------ | ------------------------- |
+| `(q_i * k_j).sum_dim(-1)`        | `E·H·C` = **766,308,352**      | `[E, H, 1]` = **47.9 MB** |
+| `q_i.matmul(k_jᵀ)` then diagonal | `E·H·H·C` = **12,260,933,632** | `[E, H, H]` = **0.77 GB** |
+
+16× the arithmetic and 16× the memory to compute 15/16 garbage. The elementwise-then-sum form
+computes the diagonal directly.
+
+#### Where a matmul _is_ the right tool
+
+Dense self-attention. There you have `Q` of shape `[H, N, C]` and `K` of shape `[H, M, C]`, and you
+genuinely want **every** query against **every** key: `Q @ Kᵀ` → `[H, N, M]`, a real matrix product
+with `C` contracted and `H` batched. That is why anemoi's self-attention path uses head-major
+layout while the graph conv does not (§5b).
+
+The difference is which pairs you want:
+
+|                                  | Pairs scored                | Score tensor                               |
+| -------------------------------- | --------------------------- | ------------------------------------------ |
+| Dense attention over these grids | all `N_dst × N_src`         | `[H, 40320, 542080]` ≈ 350 billion entries |
+| This graph conv                  | only the `E` that are edges | `[E, H, 1]` = 12 million entries           |
+
+The gathers in steps 1-3 already picked out the pairs. Once the pairing is decided, no
+all-against-all operation remains — only `E · H` independent dot products, which is exactly what
+elementwise-multiply-then-sum expresses.
+
+### 7e. Why divide by `√C`
+
+If `q` and `k` had independent components with mean 0 and variance 1, then `q · k` — a sum of `C`
+such products — would have variance `C`, so a standard deviation of `√64 = 8`. Logits would grow
+with the head width, pushing softmax into its saturated region where one weight is ~1, the rest ~0,
+and the gradient vanishes. Dividing by `√C` restores unit scale. This is Vaswani et al. §3.2.1
+([1706.03762](https://arxiv.org/abs/1706.03762)); anemoi spells it `/ self.out_channels**0.5`
+(`conv.py:142`).
+
+The port precomputes the reciprocal and multiplies (`src/common.rs:131`): `1/√C` is one rounding of
+a constant, versus `E · H` divisions each carrying their own error.
+
+### 7f. Broadcasting: how `[E, H, 1]` meets `[E, H, C]`
+
+Step 6 multiplies tensors of different shapes. Burn's rules are stricter than NumPy's, and they are
+enforced at two different times:
+
+**Rank must match, and it is a compile-time constraint.** `Tensor<B, D, K>` carries `D` as a const
+generic, and the elementwise check takes both operands at the _same_ `D`
+(`burn-tensor-0.21.0/src/tensor/api/check.rs:43-51`). Burn will not left-pad a rank-2 tensor with a
+leading `1` the way NumPy does; a rank mismatch fails to compile.
+
+**Sizes broadcast equal-or-1, checked at runtime.** `binary_ops_ew_shape` walks every axis and
+accepts a pair only if the sizes are equal or one of them is `1` (`check.rs:1329-1339`).
+
+Applied to step 6:
+
+```
+   v_j    [E, H, C]        rank 3
+   alpha  [E, H, 1]        rank 3          ✓ ranks match — compiles
+                ^
+   axis 0:  E vs E   equal      ✓
+   axis 1:  H vs H   equal      ✓
+   axis 2:  1 vs C   one is 1   ✓ broadcast — the single value is reused C times
+
+   result [E, H, C]
+```
+
+This is why §7g's rank detail matters in practice: `[E, H]` would be rank 2 and **would not
+compile** against `[E, H, C]`. Keeping the reduced axis is not cosmetic.
+
+### 7g. Step 5 — what `alpha` is
 
 Following `conv.py:139-147` against the Rust in `src/common.rs:138-148`:
 
@@ -753,14 +948,14 @@ Following `conv.py:139-147` against the Rust in `src/common.rs:138-148`:
 | `.view(-1, heads, 1)`         | `[E, H, 1]`           | — not needed      | ready to broadcast against `[E, H, C]` |
 
 The rank difference is a real API difference, not a bug: **PyTorch's `sum` drops the reduced axis;
-Burn's `sum_dim` keeps it.** That is why anemoi needs the `.view` at `conv.py:147` and the port does
-not. Verified: `sum_dim` returns `Self`, preserving the const-generic rank
-(`burn-tensor-0.21.0/src/tensor/api/numeric.rs:451`).
+Burn's `sum_dim` keeps it.** So anemoi has to put the axis back by hand at `conv.py:147` before it
+can broadcast, exactly as §7f requires; the port never loses it. Verified: `sum_dim` returns `Self`,
+preserving the const-generic rank (`burn-tensor-0.21.0/src/tensor/api/numeric.rs:451`).
 
 So `alpha` is **one number per (edge, head)**. Not per channel — the channel axis was contracted
 away by the dot product. It answers: _how much should this edge's message count, for this head?_
 
-### 7b. Three softmaxes on the same numbers
+### 7h. Step 5 — three softmaxes on the same numbers
 
 Take the seven logits from §6b and normalise them three ways.
 
@@ -789,7 +984,7 @@ locality: adding one edge anywhere changes every weight.
 **(iii) Segment softmax** — the correct one. Column 3 above. Each destination's weights sum to
 `1.000` independently.
 
-### 7c. Why no `dim` argument can express it
+### 7i. Step 5 — why no `dim` argument can express it
 
 `activation::softmax(tensor, dim)` normalises over **the full extent of one axis**. Segment
 boundaries here are `colptr[d]..colptr[d+1]` — **variable-length runs inside axis 0**:
@@ -811,6 +1006,26 @@ than reusing `torch.softmax`.
 graph satisfies this exactly. The encoder's `CutOffEdges` graph does not — and its maximum degree
 is unknown (§2b), so the padded-dense variant of this trick cannot even be costed yet. That is
 follow-up 2 in the design note.
+
+### 7j. Steps 6-7 — weight, then aggregate
+
+```rust
+let msg = v_j * alpha;    // [E,H,C] * [E,H,1] -> [E,H,C]   (§7f)
+```
+
+One scalar scales all `C` channels of an edge's message, per head. Nothing is contracted; the
+shapes come back to `[E, H, C]` purely by broadcast.
+
+Step 7 sums the messages into their destinations — the scatter, §8. Because §7h's weights sum to
+`1.000` within each destination, the result is a **convex combination** of that destination's
+incoming `v_j` rows: a weighted average, never an extrapolation beyond the range of its inputs. A
+softmax that normalised over the wrong axis would silently break that property, which is another
+way of saying why §7i matters.
+
+Two things worth noticing about the shape trajectory `[E,H,C] → [E,H,1] → [E,H,C]`: the `C` axis is
+destroyed and restored, and the `H` axis is never touched by anything. Heads enter as 16
+independent copies of the same computation and leave the same way — the only place they meet is the
+final reshape back to `[N_dst, 1024]` outside this function (§5a).
 
 ---
 
