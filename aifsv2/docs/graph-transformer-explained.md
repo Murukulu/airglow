@@ -999,6 +999,31 @@ Applied to step 6:
 This is why §7g's rank detail matters in practice: `[E, H]` would be rank 2 and **would not
 compile** against `[E, H, C]`. Keeping the reduced axis is not cosmetic.
 
+#### What the type actually guarantees: rank, and nothing else
+
+Burn 0.21 has no shape-typed tensors. `Tensor<B, 3>` carries `D = 3` as a const generic and that is
+the entire contract — `[E, H, 1]`, `[E, H, C]`, `[E, 1, H]` and `[N_dst, H, 1]` are all **the same
+type**. Extents are runtime data, so every `[E, …]` in this document is a convention held up by the
+code that produced the tensor, not a fact the compiler knows.
+
+Nor do the runtime checks close the gap evenly. They are per-operation and narrow:
+
+| Operation                   | What it verifies                                                    | What it lets through                                                            |
+| --------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| elementwise (`*`, `-`, `/`) | every axis equal-or-1 (`check.rs:1329-1339`)                        | a size-1 axis silently broadcasting where a real size was meant                 |
+| `select_assign`             | axis in range; `values.shape[dim] == indices.shape[0]` (`check.rs`) | **any mismatch between `values` and the destination on the other axes**         |
+| `matmul`                    | `lhs.shape[D-1] == rhs.shape[D-2]` (`check.rs:534-566`)             | nothing much — this one is tight                                                |
+| `select`                    | axis in range                                                       | out-of-range index _values_, on backends without bounds checks (`base.rs:1764`) |
+
+The `select_assign` row is the sharp edge: the axes carrying `H` and `C` are never compared against
+the destination buffer, so a tensor with the right dim 0 and the wrong trailing axes reaches the
+kernel and is indexed with mismatched strides. Nothing panics.
+
+The practical consequence is that shape correctness in this layer is an **assertion discipline**,
+not a type-system property, and it is cheapest to enforce where the invariant is born rather than
+at every use — which is why `EdgeIndex` gets a checked constructor. §5 Steps 3-4 of the design note
+carry the specific assertions.
+
 ### 7g. Step 5 — what `alpha` is
 
 Following `conv.py:139-147` against the Rust in `src/common.rs:138-148`:
@@ -1047,7 +1072,86 @@ locality: adding one edge anywhere changes every weight.
 **(iii) Segment softmax** — the correct one. Column 3 above. Each destination's weights sum to
 `1.000` independently.
 
-### 7i. Step 5 — why no `dim` argument can express it
+### 7i. Step 5 — how it is actually computed: down, then back up
+
+Segment softmax is a **scatter followed by a gather**. Every segmented reduction has this shape:
+reduce into the segment domain, then broadcast the per-segment result back out to its members.
+
+```
+num      [E, H, 1]            edge domain        num = exp(alpha - m)
+   │
+   │  select_assign(0, dst, Add)         lower:  E -> N_dst   (sum within each segment)
+   ▼
+denom    [N_dst, H, 1]        destination domain
+   │
+   │  select(0, dst)                     lift:   N_dst -> E   (copy back to each member)
+   ▼
+denom_e  [E, H, 1]            edge domain
+   │
+   ▼
+num / denom_e  ->  [E, H, 1]
+```
+
+The gather back up is not optional bookkeeping — it is forced twice over:
+
+- **Softmax's output is per-edge.** Edge `e` needs _its own_ destination's denominator, i.e.
+  `denom[dst[e]]`. That is a lookup by `dst`, the same operation as `query.select(0, dst)` in
+  step 1.
+- **The shapes do not otherwise meet.** `[E, H, 1] / [N_dst, H, 1]` is `748348` against `40320` on
+  axis 0 with neither equal to 1, which the equal-or-1 rule rejects (§7f).
+
+On the §6 toy, `denom = [1.7362, 1.0000, 2.4931]` — three rows — gathered by
+`dst = [0,0,0,1,2,2,2]` becomes seven:
+
+```
+[1.7362, 1.7362, 1.7362, 1.0000, 2.4931, 2.4931, 2.4931]
+```
+
+and `0.4931 / 1.7362 = 0.284`, matching §6b. Note the numerator is **not** gathered: it is already
+edge-indexed and correctly aligned. Only `denom` is in the wrong domain.
+
+PyG writes the identical pair, `_softmax.py:87-88`:
+
+```python
+out_sum = scatter(out, index, dim, dim_size=N, reduce="sum") + 1e-16
+out_sum = out_sum.index_select(dim, index)
+```
+
+`index_select(dim, index)` _is_ `select(0, dst)`, and line 85 does the same round trip a second time
+for the max. Its segment-pointer branch (`_softmax.py:69-80`) performs the same broadcast with
+`repeat_interleave` over run lengths instead of an index gather — cheaper, because with `colptr` you
+already know each segment's length. That is one of the things a `colptr`-driven CubeCL kernel gets
+for free (§4b).
+
+#### Why subtract a max at all
+
+Softmax is shift-invariant — for any constant `c`, `exp(xᵢ−c) / Σⱼ exp(xⱼ−c)` equals
+`exp(xᵢ) / Σⱼ exp(xⱼ)`, because the `exp(−c)` factors cancel. So `m` is chosen purely for floating
+point.
+
+In f32, `exp` overflows to `inf` above **88.72** and flushes to zero below **−103.28**. Without the
+shift, logits of `[90, 89, 88]` give `[inf, inf, 1.65e38]` and then `[nan, nan, 0.0]`; with it,
+`[1.0, 0.3679, 0.1353]` → `[0.665, 0.245, 0.090]`. Not a precision loss — a destroyed tensor, and
+`NaN` propagates.
+
+The **max** is the unique constant that puts every argument in `(−∞, 0]`, so `exp(x−m) ∈ (0, 1]` and
+overflow becomes structurally unreachable rather than merely unlikely. Anything smaller leaves
+overflow headroom; anything larger drags the group toward underflow. It pairs with the `1/√C` of
+§7e, which fixes the logits' _scale_ where this fixes their _absolute position_.
+
+Using a **global** max rather than a per-segment one keeps one guarantee and loses the other:
+
+|                     | Per-segment max (PyG)                   | Global max (this port)                           |
+| ------------------- | --------------------------------------- | ------------------------------------------------ |
+| Overflow impossible | yes                                     | yes — every `x − m ≤ 0` regardless               |
+| Denominator `≥ 1`   | yes — each segment contains its own max | **no** — only the segment holding the global max |
+
+A segment whose logits all sit more than 103.3 below the global max would flush to zero entirely and
+divide `0/0`. With post-LayerNorm logits of roughly unit variance (§7e) that spread is far outside
+anything realistic, but it is where PyG's `+ 1e-16` earns its place in this variant: it turns a
+remote `NaN` into a `0`, which is the right answer for a segment that has genuinely vanished.
+
+### 7j. Step 5 — why no `dim` argument can express it
 
 `activation::softmax(tensor, dim)` normalises over **the full extent of one axis**. Segment
 boundaries here are `colptr[d]..colptr[d+1]` — **variable-length runs inside axis 0**:
@@ -1070,7 +1174,7 @@ graph satisfies this exactly. The encoder's `CutOffEdges` graph does not — and
 is unknown (§2b), so the padded-dense variant of this trick cannot even be costed yet. That is
 follow-up 2 in the design note.
 
-### 7j. Steps 6-7 — weight, then aggregate
+### 7k. Steps 6-7 — weight, then aggregate
 
 ```rust
 let msg = v_j * alpha;    // [E,H,C] * [E,H,1] -> [E,H,C]   (§7f)
@@ -1083,7 +1187,7 @@ Step 7 sums the messages into their destinations — the scatter, §8. Because �
 `1.000` within each destination, the result is a **convex combination** of that destination's
 incoming `v_j` rows: a weighted average, never an extrapolation beyond the range of its inputs. A
 softmax that normalised over the wrong axis would silently break that property, which is another
-way of saying why §7i matters.
+way of saying why §7j matters.
 
 Two things worth noticing about the shape trajectory `[E,H,C] → [E,H,1] → [E,H,C]`: the `C` axis is
 destroyed and restored, and the `H` axis is never touched by anything. Heads enter as 16
@@ -1126,6 +1230,23 @@ Two properties make gather easy:
 - **Every output cell is written exactly once.** The output has one row per index, in order.
 - **Duplicate indices are free.** `src[0]` and `src[4]` are both `0`; row 0 of `value` is simply
   read twice. Concurrent reads of the same address never conflict.
+
+**The output length is the _index_ length, not the source length.** `output.shape[0] ==
+indices.len()`; the source's dim 0 never appears in the output shape — it only bounds what the
+index values may legally be. So a gather can shrink a tensor, keep it the same, or **grow** it:
+
+```
+  value                   [      4, H, C]      4 rows
+  src                     [      7]            7 indices
+  value.select(0, src)  = [      7, H, C]      7 rows      <- grew, because src repeats
+
+  denom                   [ 40320, H, 1]       40,320 rows
+  dst                     [748348]             748,348 indices
+  denom.select(0, dst)  = [748348, H, 1]       748,348 rows   <- each row copied ~18.6x
+```
+
+`select` is a **lookup, not a filter** — `[source[i] for i in indices]`. Reading it as "pick out a
+subset" is what makes the growing case surprising.
 
 Shape goes `[N_src, …] → [E, …]`. It moves data _into_ the edge domain.
 
