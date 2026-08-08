@@ -1,102 +1,20 @@
 use burn::{
+    Tensor,
     config::Config,
     module::Module,
-    nn::{Dropout, LayerNorm, LayerNormConfig, Linear, LinearConfig},
-    prelude::*,
+    nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig},
     tensor::backend::Backend,
 };
 
-use crate::common;
+use crate::{
+    common::{MultiLayerPreceptron, MultiLayerPreceptronConfig, graph_tranformer_conv},
+    graph::EdgeIndex,
+};
 
-// TODO(saiputravu): Clean up these comments.
-// This can be replaced with https://arxiv.org/pdf/2511.11581b
-// (Triton Attention Kernel). This is also an implementation of the
-// pytorch_geometric MessagePassing
-// (https://github.com/pyg-team/pytorch_geometric/blob/cc678a392255a1467872f54582724b8dce434603/torch_geometric/nn/conv/message_passing.py#L39)
-
+// Ref:
+// https://github.com/ecmwf/anemoi-core/blob/6aa1dc2a2b929211fe1c633ddbaeb68bc8fc7adf/models/src/anemoi/models/layers/block.py#L1032
 #[derive(Config, Debug)]
-pub struct GraphTransformerConvConfig {
-    out_channels: usize,
-    dropout: f64,
-
-    aggr_type: String, // TODO(saiputravu): This should be an enum...
-    flow: String,      // TODO(saiputravu): This should be an enum...
-    node_dim: usize,
-    fuse: bool,
-
-    // Feature decomp. paper: https://arxiv.org/abs/2104.03058
-    #[config(default = 1)]
-    decomposed_layers: usize,
-}
-
-#[derive(Module, Debug)]
-pub struct GraphTransformerConv<B: Backend> {
-    dropout: Dropout,
-    // FIXME(saiputravu):
-    fuse: bool,
-    decomposed_layers: usize,
-}
-
-impl GraphTransformerConvConfig {
-    fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerConv<B> {
-        GraphTransformerConv {
-            dropout: Dropout { prob: self.dropout },
-            linear_dummy: LinearConfig::new(0, 0).init(device),
-            fuse: self.fuse,
-            decomposed_layers: self.decomposed_layers,
-        }
-    }
-}
-
-struct Adj<B: Backend, const D: usize> {
-    adj_t: Tensor<B, D>,
-    e_id: Option<Tensor<B, D>>,
-    size: (usize, usize),
-}
-
-// https://pytorch-geometric.readthedocs.io/en/2.6.0/notes/create_gnn.html#the-messagepassing-base-class
-pub trait MessagePassing<B: Backend, const D: usize> {
-    fn aggregate(&self, x: Tensor<B, D>, dim: usize) -> Tensor<B, D>;
-    fn propagate(&self, edge_index: Adj<B, D>, size: Option<usize>) -> Tensor<B, D>;
-}
-
-// https://github.com/pyg-team/pytorch_geometric/blob/cc678a392255a1467872f54582724b8dce434603/torch_geometric/nn/aggr/basic.py#L12
-fn sum_forward<B: Backend, const D: usize>(x: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
-    x.sum_dim(dim)
-}
-
-// GraphTransformerConv: https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.conv.TransformerConv.html
-impl<B: Backend, const D: usize> MessagePassing<B, D> for GraphTransformerConv<B> {
-    fn aggregate(&self, x: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
-        sum_forward(x, dim)
-    }
-
-    // Message propagation.
-    fn propagate(&self, edge_index: Adj<B, D>, size: Option<usize>) -> Tensor<B, D> {
-        if self.fuse {
-            let out = self.message_and_aggregate(edge_index);
-            let out = self.update(out);
-            return out;
-        } else {
-            let mut decomp_out: Vec<Tensor<B, D>> = Vec::default();
-            // Else run both functions in separation?
-            // TODO(saiputravu): Do some reading on fused vs. non-fused.
-            for i in 0..self.decomp {
-                let out = self.message(..);
-                let out = self.aggregate(out);
-                let out = self.update(out);
-                decomp_out.push(out);
-            }
-            // FIXME(saiputravu): Fix this sloppy mess.
-            return Tensor::cat(decomp_out, decomp_out[0].shape()[-1]);
-        }
-    }
-
-    // fn forward() {}
-}
-
-#[derive(Config, Debug)]
-pub struct GraphTransformerMapperBlockConfig {
+pub struct GraphTransformerProcessorBlockConfig {
     in_channels: usize,
     out_channels: usize,
     hidden_dim: usize,
@@ -106,47 +24,58 @@ pub struct GraphTransformerMapperBlockConfig {
     update_src_nodes: bool,
     qk_norm: bool,
     edge_pre_mlp: bool,
+
+    #[config(default = true)]
     bias: bool,
 
     conv_dropout: f64,
     // TODO(saiputravu): Think about other parameters.
 }
 
+// For more context related to GraphTransformers, see paper https://arxiv.org/pdf/2403.10667.
 #[derive(Module, Debug)]
-pub struct GraphTransformerMapperBlock<B: Backend> {
+pub struct GraphTransformerProcessorBlock<B: Backend> {
+    // Layer norms.
+    // TODO(saiputravu): Think about which parts of this can just get replaced with MHA.
+    layer_norm_attention_src: LayerNorm<B>,
+    layer_norm_attention_dst: LayerNorm<B>, // Also called layer_norm_attention.
+    layer_norm_mlp_src: Option<LayerNorm<B>>,
+    layer_norm_mlp_dst: LayerNorm<B>,
+
+    // Attention projections.
     lin_key: Linear<B>,
     lin_query: Linear<B>,
     lin_value: Linear<B>,
-    lin_self: Linear<B>,
+    lin_self: Linear<B>, // Projection for the prevention of over-smoothing (W_r).
     lin_edge: Linear<B>,
+
+    node_src_mlp: Option<MultiLayerPreceptron<B>>,
+    node_dst_mlp: MultiLayerPreceptron<B>,
     projection: Linear<B>,
 
-    // These are equivalents of AutocastLayerNorm.
+    // Unused in current upstream.
     query_norm: Option<LayerNorm<B>>,
     key_norm: Option<LayerNorm<B>>,
 
-    // TODO(saiputravu): Think about which parts of this can just get replaced
-    // with MHA.
-    layer_norm_attention: LayerNorm<B>,
-    layer_norm_mlp_dst: Option<LayerNorm<B>>,
-
-    node_dst_mlp: common::MultiLayerPreceptron<B>,
-    node_src_mlp: Option<MultiLayerPreceptron<B>>,
-
-    // Edge pre-processing.
-    edge_pre_mlp: Option<MultiLayerPreceptron<B>>,
-
-    conv: GraphTransformerConv<B>,
+    // Store the configuration itself.
+    conf: GraphTransformerProcessorBlockConfig,
 }
 
-impl GraphTransformerMapperBlockConfig {
+impl GraphTransformerProcessorBlockConfig {
     fn out_channels_conv(&self) -> usize {
         let out_channels_conv = self.attn_channels / self.num_heads;
         out_channels_conv
     }
 
-    fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerMapperBlock<B> {
+    fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerProcessorBlock<B> {
         let out_channels_conv = self.out_channels_conv();
+
+        // Setup the norms.
+        let layer_norm_attention_src = LayerNormConfig::new(self.in_channels).init(device);
+        let layer_norm_attention_dst = LayerNormConfig::new(self.in_channels).init(device);
+        let layer_norm_mlp_dst = LayerNormConfig::new(self.out_channels).init(device);
+
+        // Setup linear projections.
         let lin_key =
             LinearConfig::new(self.in_channels, self.num_heads * out_channels_conv).init(device);
         let lin_query =
@@ -158,56 +87,172 @@ impl GraphTransformerMapperBlockConfig {
             .init(device);
         let lin_edge =
             LinearConfig::new(self.edge_dim, self.num_heads * out_channels_conv).init(device);
-        let projection = LinearConfig::new(self.attn_channels, self.out_channels).init(device);
-        let query_norm = if self.qk_norm {
-            Some(LayerNormConfig::new(out_channels_conv).init(device))
-        } else {
-            None
-        };
-        let key_norm = if self.qk_norm {
-            Some(LayerNormConfig::new(out_channels_conv).init(device))
-        } else {
-            None
-        };
-        let layer_norm_attention = LayerNormConfig::new(self.in_channels).init(device);
-        let layer_norm_mlp_dst = LayerNormConfig::new(self.out_channels).init(device);
+
+        // Setup MLPs.
         let node_dst_mlp = MultiLayerPreceptronConfig::new(
             self.out_channels,
             self.out_channels,
             self.hidden_dim,
             0,
             false,
-        );
-        let node_src_mlp = ();
-        let edge_pre_mlp = if self.edge_pre_mlp {
-            Some(
-                MultiLayerPreceptronConfig::new(self.edge_dim, self.edge_dim, 0, 0, false)
-                    .with_final_activation(true)
+        )
+        .init(device);
+
+        // Setup final projection.
+        let projection = LinearConfig::new(self.attn_channels, self.out_channels).init(device);
+
+        // Setup options.
+        let (node_src_mlp, layer_norm_mlp_src) = if self.update_src_nodes {
+            (
+                Some(
+                    MultiLayerPreceptronConfig::new(
+                        self.out_channels,
+                        self.out_channels,
+                        self.hidden_dim,
+                        0,
+                        false,
+                    )
                     .init(device),
+                ),
+                Some(LayerNormConfig::new(self.out_channels).init(device)),
             )
         } else {
-            None
+            (None, None)
         };
-        // FIXME(saiputravu): Correct the dropout.
-        let conv = GraphTransformerConvConfig::new(out_channels_conv, self.conv_dropout);
 
-        GraphTransformerMapperBlock {
+        let (query_norm, key_norm) = if self.qk_norm {
+            (
+                Some(LayerNormConfig::new(out_channels_conv).init(device)),
+                Some(LayerNormConfig::new(out_channels_conv).init(device)),
+            )
+        } else {
+            (None, None)
+        };
+
+        GraphTransformerProcessorBlock {
+            layer_norm_attention_src,
+            layer_norm_attention_dst,
+            layer_norm_mlp_src,
+            layer_norm_mlp_dst,
             lin_key,
             lin_query,
             lin_value,
             lin_self,
             lin_edge,
+            node_src_mlp,
+            node_dst_mlp,
             projection,
             query_norm,
             key_norm,
-            layer_norm_attention_src,
-            layer_norm_attention_dst,
-            layer_norm_mlp_src,
-            node_dst_mlp,
-            node_src_mlp,
-            edge_pre_mlp,
-            conv,
+            conf: self.clone(),
         }
+    }
+}
+
+type PairTensor<B: Backend, const D: usize> = (Tensor<B, D>, Tensor<B, D>);
+impl<B: Backend> GraphTransformerProcessorBlock<B> {
+    // This is an implementation of Anemoi GraphTransformerProcessorBlock, which is an implementation
+    // on top of UniMP, https://arxiv.org/pdf/2403.10667 -- the graph transformer paper.
+    //
+    // This takes a PairTensor in, which is of shape (x_src, x_dst)
+    //
+    // The edge_attribute is 11 = 1 length + 2 dirs + 8 trainable.
+    //
+    // TODO(saiputravu): Look at all the dims here and document it because I'm quite confused.
+    //
+    // Note: return shape
+    // ([n_src, F], [n_dst, F])
+    fn forward(
+        &self,
+        x: PairTensor<B, 2>,     // ([N_src, F], [N_dst, F])
+        edge_attr: Tensor<B, 2>, // [E, A]
+        edge_index: &EdgeIndex<B>,
+    ) -> PairTensor<B, 2> {
+        let x_skip_connection = x.clone();
+
+        // Apply layer norm across pair tensor. Keeps the same shape.
+        let x = (
+            self.layer_norm_attention_src.forward(x.clone().0),
+            self.layer_norm_attention_dst.forward(x.clone().1),
+        );
+
+        // Compute residual.
+        let res = self.lin_self.forward(x.clone().1); // [n_dst, F]
+
+        // Generate projection values and reshape. A 3D tensor is required for graph conv. New shapes:
+        // query: [n_dst, H, C]
+        // key:   [n_src, H, C]
+        // value: [n_src, H, C]
+        // edges: [E, H, C]
+        let [query, key, value, edges] = self.get_qkve(
+            x.clone(),
+            edge_attr,
+            self.conf.num_heads as i64, // TODO(saiputravu): double check these are indeed h, c
+            self.conf.attn_channels as i64, // TODO(saiputravu): double check these are indeed h, c
+        );
+
+        // Apply norm across query and key, if requested.
+        let (query, key) = if self.conf.qk_norm
+            && let (Some(query_norm), Some(key_norm)) =
+                (self.query_norm.clone(), self.key_norm.clone())
+        {
+            (query_norm.forward(query), key_norm.forward(key))
+        } else {
+            (query, key)
+        };
+
+        // Apply attention message aggregation. Shape:
+        // alpha: [n_dst, H, C]
+        // TODO(saiputravu): In the future, this is a candidate for chunking on edge_index, as anemoi does.
+        let alpha = graph_tranformer_conv(query, key, value, edges, edge_index); // [n_dst, H, C]
+        let alpha = alpha.flatten(1, 2); // [n_dst, H, C] -> [n_dst, H*C] = [n_dst, F]
+
+        let out = self.projection.forward(alpha + res); // [n_dst, F]
+        let out = out + x_skip_connection.clone().1; // [n_dst, F]
+
+        // Generate new pair tensor.
+        let nodes_new_dst = self
+            .node_dst_mlp
+            .forward(self.layer_norm_mlp_dst.forward(out.clone()))
+            + out; // Add residual. Final shape [n_dst, F]
+
+        let nodes_new_src = if self.conf.update_src_nodes
+            && let (Some(node_src_mlp), Some(layer_norm_mlp_src)) =
+                (self.node_src_mlp.clone(), self.layer_norm_mlp_src.clone())
+        {
+            node_src_mlp.forward(layer_norm_mlp_src.forward(x_skip_connection.clone().0))
+                + x_skip_connection.0
+        } else {
+            x_skip_connection.0
+        };
+
+        // ([n_src, F], [n_dst, F])
+        (nodes_new_src, nodes_new_dst)
+    }
+
+    // Here, we expect
+    // x: ([n_src, F], [n_dst, F])
+    // edge_attr: [E, A]
+    // Return value:
+    // for F=H*C
+    // [q: [n_dst, H, C]; k, v: [n_src, H, C]; e: [E, H, C]]
+    fn get_qkve(
+        &self,
+        x: PairTensor<B, 2>,
+        edge_attr: Tensor<B, 2>,
+        h: i64,
+        c: i64,
+    ) -> [Tensor<B, 3>; 4] {
+        let (x_src, x_dst) = x;
+
+        // Project and reshape by expanding matrix into tensor..
+        let q = self.lin_query.forward(x_dst).reshape([-1, h, c]);
+        let k = self.lin_key.forward(x_src.clone()).reshape([-1, h, c]);
+        let v = self.lin_value.forward(x_src).reshape([-1, h, c]);
+        // Anemoi does not do an edge attribute projection, so we do not either.
+        let e = self.lin_edge.forward(edge_attr).reshape([-1, h, c]);
+
+        [q, k, v, e]
     }
 }
 
@@ -224,7 +269,7 @@ pub struct GraphTransformerForwardMapperConfig {
 pub struct GraphTransformerForwardMapper<B: Backend> {
     emb_nodes_src: Linear<B>,
     emb_nodes_dst: Linear<B>,
-    proc: GraphTransformerMapperBlock<B>,
+    proc: GraphTransformerProcessorBlock<B>,
 }
 
 impl GraphTransformerForwardMapperConfig {
