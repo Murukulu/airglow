@@ -1043,6 +1043,37 @@ preserving the const-generic rank (`burn-tensor-0.21.0/src/tensor/api/numeric.rs
 So `alpha` is **one number per (edge, head)**. Not per channel — the channel axis was contracted
 away by the dot product. It answers: _how much should this edge's message count, for this head?_
 
+#### What `.view(-1, heads, 1)` is repairing
+
+The row is easy to read as cosmetic. It is not: without it the last line of `message()` raises.
+
+`softmax` and `dropout` are shape-preserving, so `alpha` is still rank 2 when it meets
+`value_j + edge_attr` at rank 3. PyTorch broadcasting **right-aligns** shapes, which lines up the
+wrong axes:
+
+```
+  value_j + edge_attr      [E, H, C]
+  alpha                       [E, H]
+                           ───────────
+  right-aligned:           [E,  H,  C]
+                           [_,  E,  H]
+                                ✗   ✗
+
+  RuntimeError: The size of tensor a (C) must match the size of tensor b (H)
+                at non-singleton dimension 2
+```
+
+`view(-1, heads, 1)` restores rank 3 so the axes align `E→E`, `H→H`, `1→C`. `alpha.unsqueeze(-1)`
+is bit-identical and equally free; `view` is PyG's idiom (`transformer_conv.py:282` is the same
+line) with the marginal benefit that naming `heads` asserts something about the middle axis. Tidier
+still would have been `sum(dim=-1, keepdim=True)` on `conv.py:142`, avoiding the round trip rather
+than performing and reversing it.
+
+The port needs none of this, and for two independent reasons: `sum_dim` never drops the axis, and
+Burn matches rank as a **compile-time** const generic (§7f), so the rank-2 intermediate that creates
+the hazard is not a state the Rust can reach. PyTorch's implicit right-alignment is what produces
+both the trap and the need for the repair.
+
 ### 7h. Step 5 — three softmaxes on the same numbers
 
 Take the seven logits from §6b and normalise them three ways.
