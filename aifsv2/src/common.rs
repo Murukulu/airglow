@@ -29,7 +29,7 @@ pub struct MultiLayerPreceptron<B: Backend> {
 }
 
 impl MultiLayerPreceptronConfig {
-    fn init<B: Backend>(&self, device: &B::Device) -> MultiLayerPreceptron<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> MultiLayerPreceptron<B> {
         // Compute the linear layers (first + hidden + last).
         let mut layer_confs = vec![LinearConfig::new(self.in_features, self.hidden_dim)];
         if self.n_extra_layers != 0 {
@@ -60,7 +60,7 @@ impl MultiLayerPreceptronConfig {
 }
 
 impl<B: Backend> MultiLayerPreceptron<B> {
-    fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
+    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         let mut x = input;
 
         // Apply all layers, with the activation method.
@@ -88,6 +88,8 @@ impl<B: Backend> MultiLayerPreceptron<B> {
 // we have X specific groups we want to take softmax over in dim=0.
 //
 // We write our own version of this.
+//
+// Note: return value [E, H, 1]
 pub fn sparse_segment_softmax<B: Backend>(
     x: Tensor<B, 3>,            // [E, H, 1], one logit (0/1) per head, per edge.
     dst_idx: Tensor<B, 1, Int>, // [E], array of destination nodes, sorted by corresponding source nodes.
@@ -137,9 +139,10 @@ pub fn sparse_segment_softmax<B: Backend>(
 // query: Shape [N_dst, Heads, Channels]
 // key:   Shape [N_src, Heads, Channels]
 // value: Shape [N_src, Heads, Channels]
-// edges: Shape [E, Heads, Channels] -> [N_dst, H, C]
-//
+// edges: Shape [E, Heads, Channels]
 // edge_index: Bipartite edge list, filtering the relations we care about.
+//
+// return value: [N_dst, H, C]
 //
 // https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.conv.TransformerConv.html
 // Also shared by Anemoi in GraphTransformerConv implementation.
@@ -176,7 +179,7 @@ pub fn graph_tranformer_conv<B: Backend>(
     // information.
     let q_i = query.select(0, dst.clone());
     let k_j = key.select(0, src.clone()) + edges.clone();
-    let v_j = value.select(0, src);
+    let v_j = value.select(0, src) + edges.clone();
 
     // Here, we do element-wise multiplication. Burn here treats the last two dimensions
     // as the matrix and the former dims as batches. This means that they get ignored.
@@ -186,27 +189,31 @@ pub fn graph_tranformer_conv<B: Backend>(
     // words, we get one vector for each attention head, for each edge index.
     let alpha = (q_i * k_j).sum_dim(-1) * norm;
 
-    // Here, we compute the softmax for edges across the destination-domain. Here, alpha is [E, H, 1]. So we take the
-    // softmax of each alpha over the sum of groupings defined by dst indexer.
-    let alpha = sparse_segment_softmax(alpha, dst, n_dst);
+    // Here, we compute the softmax for edges across the destination-domain. Here, alpha is [E, H, 1].
+    // So we take the softmax of each alpha over the sum of groupings defined by dst indexer.
+    let alpha = sparse_segment_softmax(alpha, dst.clone(), n_dst);
 
     // Confirm the shapes.
-    let [_e, _h, _c] = edges.shape().dims::<3>();
+    let [_e, h, c] = edges.shape().dims::<3>();
     let [__e, __h, __one] = alpha.shape().dims::<3>();
     assert_eq!(
-        [_e, _h, 1],
+        [_e, h, 1],
         [__e, __h, __one],
         "found alpha shape: ({}, {}, {}) but expected shape ({}, {}, {})",
         __e,
         __h,
         __one,
         _e,
-        _h,
+        h,
         1
     );
 
-    // This is equivalent to computing the final output representation as defined in the paper. Here, the summed
+    // This is equivalent to computing the final output representation as defined in the paper. Here, the v_j
     // component has shape [E, H, C] whereas alpha has shape [E, H, 1]. This means the multiplication happens at
     // dim=-1. So every element per-edge, per-head will be scaled by alpha.
-    (v_j + edges) * alpha
+    let msg = v_j * alpha; // [E, H, C]
+
+    // We scatter along the destination-domain indicies for message. So this convolution results in the destination
+    // domain (i.e. convolve from source nodes -> destination nodes and encode features with importance).
+    Tensor::zeros([n_dst, h, c], &edges.device()).select_assign(0, dst, msg, IndexingUpdateOp::Add)
 }
