@@ -353,3 +353,7 @@ impl<B: Backend> GraphTransformerForwardMapper<B> {
     }
     fn post_process(&self) {}
 }
+
+#[cfg(test)]
+#[path = "encoder_test.rs"]
+mod tests;
