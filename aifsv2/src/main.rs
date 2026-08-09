@@ -1,7 +1,9 @@
 use burn::{Tensor, backend::wgpu, prelude::*, tensor::backend::Backend};
 use burn_store::{ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore};
 
+mod block;
 mod common;
+mod decoder;
 mod encoder;
 mod graph;
 
