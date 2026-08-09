@@ -1,4 +1,5 @@
 use burn::{
+    module::Param,
     nn::{Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig, activation::Activation},
     prelude::*,
     tensor::IndexingUpdateOp,
@@ -156,7 +157,7 @@ pub fn graph_tranformer_conv<B: Backend>(
     key: Tensor<B, 3>,   // [N_src, H, C]
     value: Tensor<B, 3>, // [N_src, H, C]
     edges: Tensor<B, 3>, // [E, H, C]
-    edge_index: &EdgeIndex<B>,
+    edge_index: EdgeIndex<B>,
 ) -> Tensor<B, 3> {
     // We take the number of channels, inverse rooted. This is the attention normalisation
     // constant. I compute this value ahead of time, as we would prefer to keep higher
@@ -216,4 +217,44 @@ pub fn graph_tranformer_conv<B: Backend>(
     // We scatter along the destination-domain indicies for message. So this convolution results in the destination
     // domain (i.e. convolve from source nodes -> destination nodes and encode features with importance).
     Tensor::zeros([n_dst, h, c], &edges.device()).select_assign(0, dst, msg, IndexingUpdateOp::Add)
+}
+
+#[derive(Config, Debug)]
+pub struct TrainableTensorConfig {
+    tensor_size: usize,
+    trainable_size: usize,
+}
+
+#[derive(Module, Debug)]
+pub struct TrainableTensor<B: Backend, const D: usize> {
+    trainable: Param<Tensor<B, D>>,
+}
+
+impl TrainableTensorConfig {
+    pub fn init<B: Backend, const D: usize>(&self, device: &B::Device) -> TrainableTensor<B, D> {
+        assert!(
+            self.trainable_size > 0,
+            "trainable_size {} must be greater than 0",
+            self.trainable_size
+        );
+        let trainable = Param::from_tensor(Tensor::zeros(
+            [self.tensor_size, self.trainable_size],
+            device,
+        ));
+        TrainableTensor { trainable }
+    }
+}
+
+impl<B: Backend, const D: usize> TrainableTensor<B, D> {
+    pub fn forward(&self, x: Tensor<B, D>, batch_size: usize) -> Tensor<B, D> {
+        // TODO(saiputravu): Is this efficient? Can we do this?
+        let trainable = self.trainable.clone().into_value().to_device(&x.device());
+        // Nicely, for trainable tensors, we do not have to expand or reduce the dimensions, as these are just
+        // graphs which are disconnected.
+        let latent = vec![
+            x.repeat_dim(0, batch_size),
+            trainable.repeat_dim(0, batch_size),
+        ];
+        Tensor::cat(latent, D - 1)
+    }
 }
