@@ -7,9 +7,8 @@ use burn::prelude::*;
 // attr carry the edge attributes we care about.
 #[derive(Clone, Debug)]
 pub struct EdgeIndex<B: Backend> {
-    pub src: Tensor<B, 1, Int>,    // Shape [E]
-    pub dst: Tensor<B, 1, Int>,    // [E]
-    pub colptr: Tensor<B, 1, Int>, // [N_ds + 1]
+    pub src: Tensor<B, 1, Int>, // Shape [E]
+    pub dst: Tensor<B, 1, Int>, // [E]
 
     pub num_src: usize,
     pub num_dst: usize,
@@ -21,20 +20,12 @@ pub struct EdgeIndex<B: Backend> {
 pub fn cat<B: Backend>(edge_indices: Vec<EdgeIndex<B>>) -> EdgeIndex<B> {
     let mut srcs = Vec::default();
     let mut dsts = Vec::default();
-    let mut colptrs = Vec::default();
     let mut num_srcs = 0 as usize;
     let mut num_dsts = 0 as usize;
 
-    let mut colptrs_max = Tensor::from_ints([0], &edge_indices[0].src.device());
     for e in edge_indices.iter() {
         srcs.push(e.src.clone());
         dsts.push(e.dst.clone());
-
-        // Add colptrs the max of the previous. Track the max.
-        // TODO(saiputravu): Is this correct + there has to be a nicer way of
-        // doing this + do we even need colptrs, its unused.
-        colptrs.push(e.colptr.clone() + colptrs_max.clone());
-        colptrs_max = colptrs_max + e.colptr.clone().max_dim(0);
 
         num_srcs += e.num_src;
         num_dsts += e.num_dst;
@@ -43,7 +34,6 @@ pub fn cat<B: Backend>(edge_indices: Vec<EdgeIndex<B>>) -> EdgeIndex<B> {
     EdgeIndex {
         src: Tensor::cat(srcs, 0),
         dst: Tensor::cat(dsts, 0),
-        colptr: Tensor::cat(colptrs, 0),
         num_src: num_srcs,
         num_dst: num_dsts,
     }
