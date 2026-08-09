@@ -1,4 +1,5 @@
 use burn::{
+    module::Param,
     nn::{Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig, activation::Activation},
     prelude::*,
     tensor::IndexingUpdateOp,
@@ -107,6 +108,8 @@ pub fn sparse_segment_softmax<B: Backend>(
 
     // This computation should be per-segment max, but alas...
     // We shift by the max to reduce the IEEE754 error propagation due to floating point division.
+    // The only thing that per-segment max would help with is underflow, making the numerator closer to the denominator
+    // and less risk of underflow.
     let numerator = (x - m).exp(); // [E, H, 1]
 
     // The softmax denominator summation. This will be of shape [n_dst, H, 1] as we want to work out the summation of
@@ -119,7 +122,7 @@ pub fn sparse_segment_softmax<B: Backend>(
         dst_idx.clone(),
         numerator.clone(),
         IndexingUpdateOp::Add,
-    );
+    ) + 1e-16; // Underflow protection. TODO(saiputravu): I'm concerned about model performance impact by this.
 
     // We regather denominator and spray out to shape [E, H, 1], re-using the same denominator for source-domain nodes
     // sharing the destination-domain nodes.
@@ -156,7 +159,7 @@ pub fn graph_tranformer_conv<B: Backend>(
     key: Tensor<B, 3>,   // [N_src, H, C]
     value: Tensor<B, 3>, // [N_src, H, C]
     edges: Tensor<B, 3>, // [E, H, C]
-    edge_index: &EdgeIndex<B>,
+    edge_index: EdgeIndex<B>,
 ) -> Tensor<B, 3> {
     // We take the number of channels, inverse rooted. This is the attention normalisation
     // constant. I compute this value ahead of time, as we would prefer to keep higher
@@ -164,15 +167,26 @@ pub fn graph_tranformer_conv<B: Backend>(
     // small numbers.
     //
     // TODO(putravu): cite this.
-    let shape = query.shape().dims::<3>();
-    let norm = 1. / f64::sqrt(shape[2] as f64);
+    let [n_dst, h, c] = query.shape().dims::<3>();
+    let norm = 1. / f64::sqrt(c as f64);
     let dst = edge_index.clone().dst; // [E]
     let src = edge_index.clone().src; // [E]
-    let n_dst = shape[0];
+    let n_src = key.shape().dims::<3>()[0];
     assert_eq!(
         n_dst, edge_index.num_dst,
         "found n_dst: {} but expected: {}",
         n_dst, edge_index.num_dst
+    );
+    assert_eq!(
+        n_src, edge_index.num_src,
+        "found n_src: {}, expected: {}",
+        n_src, edge_index.num_src
+    );
+
+    assert_eq!(
+        key.shape(),
+        value.shape(),
+        "key and value are different shapes"
     );
 
     // These tensors are now all of shape [E, H, C] since .dst and .src are of length E. See EdgeIndex comments for more
@@ -193,21 +207,6 @@ pub fn graph_tranformer_conv<B: Backend>(
     // So we take the softmax of each alpha over the sum of groupings defined by dst indexer.
     let alpha = sparse_segment_softmax(alpha, dst.clone(), n_dst);
 
-    // Confirm the shapes.
-    let [_e, h, c] = edges.shape().dims::<3>();
-    let [__e, __h, __one] = alpha.shape().dims::<3>();
-    assert_eq!(
-        [_e, h, 1],
-        [__e, __h, __one],
-        "found alpha shape: ({}, {}, {}) but expected shape ({}, {}, {})",
-        __e,
-        __h,
-        __one,
-        _e,
-        h,
-        1
-    );
-
     // This is equivalent to computing the final output representation as defined in the paper. Here, the v_j
     // component has shape [E, H, C] whereas alpha has shape [E, H, 1]. This means the multiplication happens at
     // dim=-1. So every element per-edge, per-head will be scaled by alpha.
@@ -217,3 +216,47 @@ pub fn graph_tranformer_conv<B: Backend>(
     // domain (i.e. convolve from source nodes -> destination nodes and encode features with importance).
     Tensor::zeros([n_dst, h, c], &edges.device()).select_assign(0, dst, msg, IndexingUpdateOp::Add)
 }
+
+#[derive(Config, Debug)]
+pub struct TrainableTensorConfig {
+    tensor_size: usize,
+    trainable_size: usize,
+}
+
+#[derive(Module, Debug)]
+pub struct TrainableTensor<B: Backend, const D: usize> {
+    trainable: Param<Tensor<B, D>>,
+}
+
+impl TrainableTensorConfig {
+    pub fn init<B: Backend, const D: usize>(&self, device: &B::Device) -> TrainableTensor<B, D> {
+        assert!(
+            self.trainable_size > 0,
+            "trainable_size {} must be greater than 0",
+            self.trainable_size
+        );
+        let trainable = Param::from_tensor(Tensor::zeros(
+            [self.tensor_size, self.trainable_size],
+            device,
+        ));
+        TrainableTensor { trainable }
+    }
+}
+
+impl<B: Backend, const D: usize> TrainableTensor<B, D> {
+    pub fn forward(&self, x: Tensor<B, D>, batch_size: usize) -> Tensor<B, D> {
+        // TODO(saiputravu): Is this efficient? Can we do this?
+        let trainable = self.trainable.clone().into_value().to_device(&x.device());
+        // Nicely, for trainable tensors, we do not have to expand or reduce the dimensions, as these are just
+        // graphs which are disconnected.
+        let latent = vec![
+            x.repeat_dim(0, batch_size),
+            trainable.repeat_dim(0, batch_size),
+        ];
+        Tensor::cat(latent, D - 1)
+    }
+}
+
+#[cfg(test)]
+#[path = "common_test.rs"]
+mod tests;
