@@ -7,6 +7,8 @@ use burn::{
 
 use crate::graph::EdgeIndex;
 
+pub type PairTensor<B, const D: usize> = (Tensor<B, D>, Tensor<B, D>);
+
 // Note: This is a lazy implementation of the MLP implemented in Anemoi.
 // We fix the activation to be GELU, as that is what it is in AIFS' MLP
 // layers.
