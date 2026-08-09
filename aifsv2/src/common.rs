@@ -256,3 +256,7 @@ impl<B: Backend, const D: usize> TrainableTensor<B, D> {
         Tensor::cat(latent, D - 1)
     }
 }
+
+#[cfg(test)]
+#[path = "common_test.rs"]
+mod tests;
