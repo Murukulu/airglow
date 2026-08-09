@@ -118,11 +118,11 @@ pub fn sparse_segment_softmax<B: Backend>(
     // Here, select_assign sum-reduces from numerator into the origination tensor (zeros), for all dst_idxs that are the
     // same. So we will get len(set(dst_idx)) elements, which will be edge-reduced.
     let denominator = Tensor::<B, 3>::zeros([n_dst, h, 1], &device).select_assign(
-        0 + 1e-16, // Underflow protection. TODO(saiputravu): I'm concerned about model performance impact by this.
+        0,
         dst_idx.clone(),
         numerator.clone(),
         IndexingUpdateOp::Add,
-    );
+    ) + 1e-16; // Underflow protection. TODO(saiputravu): I'm concerned about model performance impact by this.
 
     // We regather denominator and spray out to shape [E, H, 1], re-using the same denominator for source-domain nodes
     // sharing the destination-domain nodes.
@@ -167,12 +167,10 @@ pub fn graph_tranformer_conv<B: Backend>(
     // small numbers.
     //
     // TODO(putravu): cite this.
-    let shape = query.shape().dims::<3>();
-    let norm = 1. / f64::sqrt(shape[2] as f64);
+    let [n_dst, h, c] = query.shape().dims::<3>();
+    let norm = 1. / f64::sqrt(c as f64);
     let dst = edge_index.clone().dst; // [E]
     let src = edge_index.clone().src; // [E]
-
-    let n_dst = shape[0];
     let n_src = key.shape().dims::<3>()[0];
     assert_eq!(
         n_dst, edge_index.num_dst,
@@ -190,6 +188,7 @@ pub fn graph_tranformer_conv<B: Backend>(
         value.shape(),
         "key and value are different shapes"
     );
+
     // These tensors are now all of shape [E, H, C] since .dst and .src are of length E. See EdgeIndex comments for more
     // information.
     let q_i = query.select(0, dst.clone());
