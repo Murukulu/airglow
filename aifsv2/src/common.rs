@@ -108,6 +108,8 @@ pub fn sparse_segment_softmax<B: Backend>(
 
     // This computation should be per-segment max, but alas...
     // We shift by the max to reduce the IEEE754 error propagation due to floating point division.
+    // The only thing that per-segment max would help with is underflow, making the numerator closer to the denominator
+    // and less risk of underflow.
     let numerator = (x - m).exp(); // [E, H, 1]
 
     // The softmax denominator summation. This will be of shape [n_dst, H, 1] as we want to work out the summation of
@@ -116,7 +118,7 @@ pub fn sparse_segment_softmax<B: Backend>(
     // Here, select_assign sum-reduces from numerator into the origination tensor (zeros), for all dst_idxs that are the
     // same. So we will get len(set(dst_idx)) elements, which will be edge-reduced.
     let denominator = Tensor::<B, 3>::zeros([n_dst, h, 1], &device).select_assign(
-        0,
+        0 + 1e-16, // Underflow protection. TODO(saiputravu): I'm concerned about model performance impact by this.
         dst_idx.clone(),
         numerator.clone(),
         IndexingUpdateOp::Add,
@@ -169,13 +171,25 @@ pub fn graph_tranformer_conv<B: Backend>(
     let norm = 1. / f64::sqrt(shape[2] as f64);
     let dst = edge_index.clone().dst; // [E]
     let src = edge_index.clone().src; // [E]
+
     let n_dst = shape[0];
+    let n_src = key.shape().dims::<3>()[0];
     assert_eq!(
         n_dst, edge_index.num_dst,
         "found n_dst: {} but expected: {}",
         n_dst, edge_index.num_dst
     );
+    assert_eq!(
+        n_src, edge_index.num_src,
+        "found n_src: {}, expected: {}",
+        n_src, edge_index.num_src
+    );
 
+    assert_eq!(
+        key.shape(),
+        value.shape(),
+        "key and value are different shapes"
+    );
     // These tensors are now all of shape [E, H, C] since .dst and .src are of length E. See EdgeIndex comments for more
     // information.
     let q_i = query.select(0, dst.clone());
@@ -193,21 +207,6 @@ pub fn graph_tranformer_conv<B: Backend>(
     // Here, we compute the softmax for edges across the destination-domain. Here, alpha is [E, H, 1].
     // So we take the softmax of each alpha over the sum of groupings defined by dst indexer.
     let alpha = sparse_segment_softmax(alpha, dst.clone(), n_dst);
-
-    // Confirm the shapes.
-    let [_e, h, c] = edges.shape().dims::<3>();
-    let [__e, __h, __one] = alpha.shape().dims::<3>();
-    assert_eq!(
-        [_e, h, 1],
-        [__e, __h, __one],
-        "found alpha shape: ({}, {}, {}) but expected shape ({}, {}, {})",
-        __e,
-        __h,
-        __one,
-        _e,
-        h,
-        1
-    );
 
     // This is equivalent to computing the final output representation as defined in the paper. Here, the v_j
     // component has shape [E, H, C] whereas alpha has shape [E, H, 1]. This means the multiplication happens at

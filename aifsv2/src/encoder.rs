@@ -71,6 +71,13 @@ impl GraphTransformerProcessorBlockConfig {
 
     fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerProcessorBlock<B> {
         let out_channels_conv = self.out_channels_conv();
+        assert_eq!(
+            self.attn_channels % self.num_heads,
+            0,
+            "number of heads {} does not evenly divide attention channels {}",
+            self.num_heads,
+            self.attn_channels
+        );
 
         // Setup the norms.
         let layer_norm_attention_src = LayerNormConfig::new(self.in_channels).init(device);
@@ -124,8 +131,16 @@ impl GraphTransformerProcessorBlockConfig {
 
         let (query_norm, key_norm) = if self.qk_norm {
             (
-                Some(LayerNormConfig::new(out_channels_conv).init(device)),
-                Some(LayerNormConfig::new(out_channels_conv).init(device)),
+                Some(
+                    LayerNormConfig::new(out_channels_conv)
+                        .with_bias(false)
+                        .init(device),
+                ),
+                Some(
+                    LayerNormConfig::new(out_channels_conv)
+                        .with_bias(false)
+                        .init(device),
+                ),
             )
         } else {
             (None, None)
@@ -186,12 +201,7 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
         // key:   [n_src, H, C]
         // value: [n_src, H, C]
         // edges: [E, H, C]
-        let [query, key, value, edges] = self.get_qkve(
-            x.clone(),
-            edge_attr,
-            self.conf.num_heads as i64, // TODO(saiputravu): double check these are indeed h, c
-            self.conf.attn_channels as i64, // TODO(saiputravu): double check these are indeed h, c
-        );
+        let [query, key, value, edges] = self.get_qkve(x.clone(), edge_attr);
 
         // Apply norm across query and key, if requested.
         let (query, key) = if self.conf.qk_norm
@@ -237,14 +247,10 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
     // Return value:
     // for F=H*C
     // [q: [n_dst, H, C]; k, v: [n_src, H, C]; e: [E, H, C]]
-    fn get_qkve(
-        &self,
-        x: PairTensor<B, 2>,
-        edge_attr: Tensor<B, 2>,
-        h: i64,
-        c: i64,
-    ) -> [Tensor<B, 3>; 4] {
+    fn get_qkve(&self, x: PairTensor<B, 2>, edge_attr: Tensor<B, 2>) -> [Tensor<B, 3>; 4] {
         let (x_src, x_dst) = x;
+        let h = self.conf.num_heads as i64;
+        let c = self.conf.out_channels_conv() as i64;
 
         // Project and reshape by expanding matrix into tensor..
         let q = self.lin_query.forward(x_dst).reshape([-1, h, c]);
@@ -263,7 +269,6 @@ pub struct GraphTransformerForwardMapperConfig {
     in_channels_dst: usize,
     hidden_dim: usize,
     mlp_hidden_ratio: f64,
-    out_channels_dst: Option<usize>,
     num_heads: usize,
     attn_channels: usize,
     edge_dim: usize,
@@ -330,11 +335,13 @@ impl<B: Backend> GraphTransformerForwardMapper<B> {
         let edge_attr = self.trainable.forward(edge_attr.clone(), batch_size);
         let edge_idx = graph::expand_edges(edge_idx, edge_inc, batch_size);
 
-        let x = self.pre_process(x);
-        let (x_src, x_dst) = self.proc.forward(x, edge_attr, edge_idx);
+        let (_, x_dst) = self
+            .proc
+            .forward(self.pre_process(x.clone()), edge_attr, edge_idx);
         self.post_process();
 
-        (x_src, x_dst)
+        // Anemoi drops the source embedding on return. Only the destination node embedding changes.
+        (x.0, x_dst)
     }
 
     // These are apparently no-ops in Anemoi.
