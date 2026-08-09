@@ -3,12 +3,15 @@ use burn::{
     config::Config,
     module::Module,
     nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig},
-    tensor::backend::Backend,
+    tensor::{Int, backend::Backend, ops::InterpolateOptions},
 };
 
 use crate::{
-    common::{MultiLayerPreceptron, MultiLayerPreceptronConfig, graph_tranformer_conv},
-    graph::EdgeIndex,
+    common::{
+        MultiLayerPreceptron, MultiLayerPreceptronConfig, TrainableTensor, TrainableTensorConfig,
+        graph_tranformer_conv,
+    },
+    graph::{self, EdgeIndex, cat},
 };
 
 // Ref:
@@ -21,15 +24,14 @@ pub struct GraphTransformerProcessorBlockConfig {
     num_heads: usize,
     attn_channels: usize,
     edge_dim: usize,
-    update_src_nodes: bool,
     qk_norm: bool,
     edge_pre_mlp: bool,
 
     #[config(default = true)]
     bias: bool,
-
-    conv_dropout: f64,
-    // TODO(saiputravu): Think about other parameters.
+    #[config(default = false)]
+    update_src_nodes: bool,
+    // We removed all dropout params, since we are not intending to train.
 }
 
 // For more context related to GraphTransformers, see paper https://arxiv.org/pdf/2403.10667.
@@ -166,7 +168,7 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
         &self,
         x: PairTensor<B, 2>,     // ([N_src, F], [N_dst, F])
         edge_attr: Tensor<B, 2>, // [E, A]
-        edge_index: &EdgeIndex<B>,
+        edge_index: EdgeIndex<B>,
     ) -> PairTensor<B, 2> {
         let x_skip_connection = x.clone();
 
@@ -204,10 +206,9 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
         // Apply attention message aggregation. Shape:
         // alpha: [n_dst, H, C]
         // TODO(saiputravu): In the future, this is a candidate for chunking on edge_index, as anemoi does.
-        let alpha = graph_tranformer_conv(query, key, value, edges, edge_index); // [n_dst, H, C]
-        let alpha = alpha.flatten(1, 2); // [n_dst, H, C] -> [n_dst, H*C] = [n_dst, F]
+        let msg = graph_tranformer_conv(query, key, value, edges, edge_index).flatten(1, 2); // [n_dst, H, C] -> [n_dst, H*C] = [n_dst, F]
 
-        let out = self.projection.forward(alpha + res); // [n_dst, F]
+        let out = self.projection.forward(msg + res); // [n_dst, F]
         let out = out + x_skip_connection.clone().1; // [n_dst, F]
 
         // Generate new pair tensor.
@@ -261,28 +262,87 @@ pub struct GraphTransformerForwardMapperConfig {
     in_channels_src: usize,
     in_channels_dst: usize,
     hidden_dim: usize,
+    mlp_hidden_ratio: f64,
     out_channels_dst: Option<usize>,
+    num_heads: usize,
+    attn_channels: usize,
+    edge_dim: usize,
+
+    edge_attr_shape: usize,
+    trainable_size: usize,
+
+    #[config(default = 1)] // Not expecting to do sharding.
     num_chunks: usize,
+    #[config(default = false)]
+    qk_norm: bool,
+    #[config(default = false)]
+    edge_pre_mlp: bool,
 }
 
 #[derive(Module, Debug)]
 pub struct GraphTransformerForwardMapper<B: Backend> {
     emb_nodes_src: Linear<B>,
     emb_nodes_dst: Linear<B>,
+    trainable: TrainableTensor<B, 2>,
     proc: GraphTransformerProcessorBlock<B>,
 }
 
 impl GraphTransformerForwardMapperConfig {
-    pub fn init<B: Backend>(&self) -> GraphTransformerForwardMapper<B> {
-        let emb_nodes_src = LinearConfig::new(self.in_channels_src, self.hidden_dim);
-        let emb_nodes_dst = LinearConfig::new(self.in_channels_dst, self.hidden_dim);
-        // let proc = ;
+    // TODO(saiputravu): Think about how we want to construct edge_attr.
+    pub fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerForwardMapper<B> {
+        let emb_nodes_src = LinearConfig::new(self.in_channels_src, self.hidden_dim).init(device);
+        let emb_nodes_dst = LinearConfig::new(self.in_channels_dst, self.hidden_dim).init(device);
+
+        let trainable =
+            TrainableTensorConfig::new(self.edge_attr_shape, self.trainable_size).init(device);
+
+        let hidden_dim = ((self.hidden_dim as f64 * self.mlp_hidden_ratio) + 0.5) as usize;
+        let proc = GraphTransformerProcessorBlockConfig::new(
+            self.hidden_dim, // in shape
+            self.hidden_dim, // out shape
+            hidden_dim,      // hidden dim
+            self.num_heads,
+            self.attn_channels,
+            self.edge_dim,
+            self.qk_norm,
+            self.edge_pre_mlp,
+        )
+        .init(device);
         GraphTransformerForwardMapper {
             emb_nodes_src,
             emb_nodes_dst,
-            proc: (),
+            trainable,
+            proc,
         }
     }
 }
 
-impl<B: Backend> GraphTransformerForwardMapper<B> {}
+impl<B: Backend> GraphTransformerForwardMapper<B> {
+    pub fn forward(
+        &self,
+        x: PairTensor<B, 2>,
+        // TODO(saiputravu): Ingest heterograph? and avoid passing this information at forward.
+        edge_attr: Tensor<B, 2>,
+        edge_idx: EdgeIndex<B>,
+        edge_inc: Tensor<B, 2, Int>,
+        batch_size: usize,
+    ) -> PairTensor<B, 2> {
+        let edge_attr = self.trainable.forward(edge_attr.clone(), batch_size);
+        let edge_idx = graph::expand_edges(edge_idx, edge_inc, batch_size);
+
+        let x = self.pre_process(x);
+        let (x_src, x_dst) = self.proc.forward(x, edge_attr, edge_idx);
+        self.post_process();
+
+        (x_src, x_dst)
+    }
+
+    // These are apparently no-ops in Anemoi.
+    fn pre_process(&self, x: PairTensor<B, 2>) -> PairTensor<B, 2> {
+        let (x_src, x_dst) = x;
+        let x_src = self.emb_nodes_src.forward(x_src);
+        let x_dst = self.emb_nodes_dst.forward(x_dst);
+        (x_src, x_dst)
+    }
+    fn post_process(&self) {}
+}
