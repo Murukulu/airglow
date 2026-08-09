@@ -17,7 +17,9 @@ pub struct MultiLayerPreceptronConfig {
     in_features: usize,
     out_features: usize,
     hidden_dim: usize,
+    #[config(default = 0)]
     n_extra_layers: usize,
+    #[config(default = false)]
     layer_norm: bool,
     #[config(default = false)]
     final_activation: bool,

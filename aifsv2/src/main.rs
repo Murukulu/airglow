@@ -6,6 +6,7 @@ mod common;
 mod decoder;
 mod encoder;
 mod graph;
+mod transformer;
 
 #[derive(Module, Debug)]
 struct Model<B: Backend> {
