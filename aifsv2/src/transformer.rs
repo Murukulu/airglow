@@ -217,7 +217,7 @@ impl<B: Backend> TransformerProcessorChunk<B> {
 }
 
 #[derive(Config, Debug)]
-struct TransformerProcessorConfig {
+pub struct TransformerProcessorConfig {
     num_channels: usize,
     num_layers: usize, // Total number of layers, split evenly across the chunks.
     num_chunks: usize, // Number of chunks in processor.
@@ -230,7 +230,7 @@ struct TransformerProcessorConfig {
 }
 
 #[derive(Module, Debug)]
-struct TransformerProcessor<B: Backend> {
+pub struct TransformerProcessor<B: Backend> {
     proc: Vec<TransformerProcessorChunk<B>>,
 }
 
