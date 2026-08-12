@@ -20,7 +20,7 @@ Usage:
     python scripts/parse_grib.py --stats               # value statistics
     python scripts/parse_grib.py --json                # -> lsm_keys.json
     python scripts/parse_grib.py --json -              # JSON to stdout
-    python scripts/parse_grib.py other.grib -m 3 -s    # 3rd message
+    python scripts/parse_grib.py -f other.grib -m 3 -s  # 3rd message of another file
 
 Requires pygrib (which brings eccodes).
 """
@@ -184,7 +184,8 @@ def select(grbs, message: int, want_all: bool) -> list:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("path", type=Path, nargs="?", default=DEFAULT_PATH, help="Path to .grib file")
+    parser.add_argument("--file", "-f", type=Path, default=DEFAULT_PATH, metavar="PATH",
+                        help=f"GRIB file to inspect (default: {DEFAULT_PATH.name})")
     parser.add_argument("--message", "-m", type=int, default=1, metavar="N",
                         help="1-based message to inspect (default: 1)")
     parser.add_argument("--all", "-a", action="store_true", help="Apply --query/--stats to every message")
@@ -202,7 +203,7 @@ def main():
                         help="Arrays longer than N are summarised in JSON instead of inlined (default: 1024)")
     args = parser.parse_args()
 
-    grbs = pygrib.open(str(args.path))
+    grbs = pygrib.open(str(args.file))
     try:
         if args.keys:
             for msg in select(grbs, args.message, args.all):
@@ -233,7 +234,7 @@ def main():
 
         if args.json is not None:
             grbs.rewind()
-            dump = {"path": str(args.path), "messages": []}
+            dump = {"path": str(args.file), "messages": []}
             for msg in grbs:
                 entry = {"messagenumber": msg.messagenumber}
                 entry |= {k: jsonable(safe_get(msg, k), args.max_array) for k in key_names(msg)}
@@ -243,15 +244,15 @@ def main():
             if args.json == "-":
                 print(text)
             else:
-                out = Path(args.json) if args.json else args.path.with_name(args.path.stem + "_keys.json")
+                out = Path(args.json) if args.json else args.file.with_name(args.file.stem + "_keys.json")
                 out.write_text(text)
                 print(f"Wrote {len(dump['messages'])} message(s) to {out}")
             return
 
         # Default: file summary, per-message listing, then the grid of the first message.
-        print(f"{args.path}")
+        print(f"{args.file}")
         plural = "message" if grbs.messages == 1 else "messages"
-        print(f"  {args.path.stat().st_size / 1e6:.1f} MB, {grbs.messages} {plural}, "
+        print(f"  {args.file.stat().st_size / 1e6:.1f} MB, {grbs.messages} {plural}, "
               f"GRIB edition {safe_get(grbs.message(1), 'editionNumber')}")
 
         grbs.rewind()

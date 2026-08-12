@@ -69,6 +69,7 @@ dependencies = [
  "burn",
  "burn-store",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

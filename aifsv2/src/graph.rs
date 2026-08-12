@@ -1,4 +1,72 @@
 use burn::prelude::*;
+use burn_store::{ModuleStore, SafetensorsStore};
+
+// The geometric half of the graph, as extracted from the .ckpt into safetensors.
+//
+// The 8 trainable columns per node and per edge are Parameters and live in the weights file
+// instead; edge attributes here are already unit-std normalised.
+#[derive(Debug)]
+pub struct GraphData<B: Backend> {
+    pub data_x: Tensor<B, 2>,   // [N_data, 2]; [lat, lon] radians, lon in 0..2pi
+    pub hidden_x: Tensor<B, 2>, // [N_hidden, 2]; same encoding
+
+    pub data_to_hidden_edge_index: Tensor<B, 2, Int>, // [2, E_enc]; row 0 src (data), row 1 dst (hidden)
+    pub data_to_hidden_edge_direction: Tensor<B, 2>,  // [E_enc, 2]; per edge direction feature.
+    pub data_to_hidden_edge_length: Tensor<B, 2>,     // [E_enc, 1]; per edge length feature.
+
+    pub hidden_to_data_edge_index: Tensor<B, 2, Int>, // [2, E_dec]; row 0 src (hidden), row 1 dst (data)
+    pub hidden_to_data_edge_direction: Tensor<B, 2>,  // [E_dec, 2]; per edge direction feature.
+    pub hidden_to_data_edge_length: Tensor<B, 2>,     // [E_dec, 1]; per edge length feature.
+
+    pub data_area_weight: Tensor<B, 2>, // [N_data, 1]; training-loss weight, unused at inference. Ignore.
+}
+
+// Snapshots are lazy — to_data is where the bytes are actually read.
+fn snapshot(store: &mut SafetensorsStore, name: &str) -> Result<TensorData, String> {
+    store
+        .get_snapshot(name)
+        .map_err(|e| format!("reading {name}: {e}"))?
+        .ok_or_else(|| format!("missing {name}"))?
+        .to_data()
+        .map_err(|e| format!("reading {name}: {e}"))
+}
+
+impl<B: Backend> GraphData<B> {
+    pub fn from_safetensors_store(
+        store: &mut SafetensorsStore,
+        device: &B::Device,
+    ) -> Result<GraphData<B>, String> {
+        Ok(GraphData {
+            data_area_weight: Tensor::from_data(snapshot(store, "data.area_weight")?, device),
+            data_x: Tensor::from_data(snapshot(store, "data.x")?, device),
+            hidden_x: Tensor::from_data(snapshot(store, "hidden.x")?, device),
+            data_to_hidden_edge_index: Tensor::from_data(
+                snapshot(store, "data_to_hidden.edge_index")?,
+                device,
+            ),
+            data_to_hidden_edge_direction: Tensor::from_data(
+                snapshot(store, "data_to_hidden.edge_dirs")?,
+                device,
+            ),
+            data_to_hidden_edge_length: Tensor::from_data(
+                snapshot(store, "data_to_hidden.edge_length")?,
+                device,
+            ),
+            hidden_to_data_edge_index: Tensor::from_data(
+                snapshot(store, "hidden_to_data.edge_index")?,
+                device,
+            ),
+            hidden_to_data_edge_direction: Tensor::from_data(
+                snapshot(store, "hidden_to_data.edge_dirs")?,
+                device,
+            ),
+            hidden_to_data_edge_length: Tensor::from_data(
+                snapshot(store, "hidden_to_data.edge_length")?,
+                device,
+            ),
+        })
+    }
+}
 
 // This structure stores the bipartite edge list for one sub-graph.
 // This connects source nodes to dest nodes.
