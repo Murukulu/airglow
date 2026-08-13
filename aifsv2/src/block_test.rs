@@ -1,4 +1,5 @@
 use super::*;
+use burn::tensor::Int;
 
 type TestBackend = burn::backend::wgpu::Wgpu;
 
