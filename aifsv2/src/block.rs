@@ -3,12 +3,11 @@ use burn::{
     config::Config,
     module::Module,
     nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig},
-    tensor::backend::Backend,
+    tensor::{Int, backend::Backend},
 };
 
-use crate::{
-    common::{MultiLayerPreceptron, MultiLayerPreceptronConfig, PairTensor, graph_tranformer_conv},
-    graph::EdgeIndex,
+use crate::common::{
+    MultiLayerPreceptron, MultiLayerPreceptronConfig, PairTensor, graph_tranformer_conv,
 };
 
 // Ref:
@@ -19,7 +18,6 @@ pub struct GraphTransformerProcessorBlockConfig {
     out_channels: usize,
     hidden_dim: usize,
     num_heads: usize,
-    attn_channels: usize,
     edge_dim: usize,
     qk_norm: bool,
     edge_pre_mlp: bool,
@@ -62,18 +60,18 @@ pub struct GraphTransformerProcessorBlock<B: Backend> {
 
 impl GraphTransformerProcessorBlockConfig {
     pub fn out_channels_conv(&self) -> usize {
-        let out_channels_conv = self.attn_channels / self.num_heads;
+        let out_channels_conv = self.out_channels / self.num_heads;
         out_channels_conv
     }
 
     pub fn init<B: Backend>(&self, device: &B::Device) -> GraphTransformerProcessorBlock<B> {
         let out_channels_conv = self.out_channels_conv();
         assert_eq!(
-            self.attn_channels % self.num_heads,
+            self.out_channels % self.num_heads,
             0,
             "number of heads {} does not evenly divide attention channels {}",
             self.num_heads,
-            self.attn_channels
+            self.out_channels
         );
 
         // Setup the norms.
@@ -100,7 +98,7 @@ impl GraphTransformerProcessorBlockConfig {
                 .init(device);
 
         // Setup final projection.
-        let projection = LinearConfig::new(self.attn_channels, self.out_channels).init(device);
+        let projection = LinearConfig::new(self.out_channels, self.out_channels).init(device);
 
         // Setup options.
         let (node_src_mlp, layer_norm_mlp_src) = if self.update_src_nodes {
@@ -170,9 +168,12 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
     // ([n_src, F], [n_dst, F])
     pub fn forward(
         &self,
-        x: PairTensor<B, 2>,     // ([N_src, F], [N_dst, F])
-        edge_attr: Tensor<B, 2>, // [E, A]
-        edge_index: EdgeIndex<B>,
+        x: PairTensor<B, 2>,               // ([N_src, F], [N_dst, F])
+        edge_attr: Tensor<B, 2>,           // [E, A]
+        edge_index_src: Tensor<B, 1, Int>, // [E]
+        edge_index_dst: Tensor<B, 1, Int>, // [E]
+        n_src: usize,
+        n_dst: usize,
     ) -> PairTensor<B, 2> {
         let x_skip_connection = x.clone();
 
@@ -205,7 +206,20 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
         // Apply attention message aggregation. Shape:
         // alpha: [n_dst, H, C]
         // TODO(saiputravu): In the future, this is a candidate for chunking on edge_index, as anemoi does.
-        let msg = graph_tranformer_conv(query, key, value, edges, edge_index).flatten(1, 2); // [n_dst, H, C] -> [n_dst, H*C] = [n_dst, F]
+        let msg = graph_tranformer_conv(
+            query,
+            key,
+            value,
+            edges,
+            // We store block tensor [2, E] upstream, so this is required so we don't think
+            // about splitting so low down. If we do split here, we need to transfer memory for
+            // Tensor::select, which will probably be slow.
+            edge_index_src,
+            edge_index_dst,
+            n_src,
+            n_dst,
+        )
+        .flatten(1, 2); // [n_dst, H, C] -> [n_dst, H*C] = [n_dst, F]
 
         let out = self.projection.forward(msg + res); // [n_dst, F]
         let out = out + x_skip_connection.clone().1; // [n_dst, F]

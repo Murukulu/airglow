@@ -13,7 +13,6 @@ Import it:
 Or poke at it in a REPL, where `model` and `interface` are left in scope:
     .venv/bin/python -i scripts/load_model.py
 """
-
 import sys
 from pathlib import Path
 
@@ -43,3 +42,4 @@ if __name__ == "__main__":
     # print(f"data_indices: {model.data_indices}")
     # print(f"  statistics: {model.statistics}")
     print(f"  graph_data: {model._graph_data}")
+    print(f"  graph_data: {model._graph_data.node_types}")

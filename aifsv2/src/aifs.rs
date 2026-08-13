@@ -6,14 +6,18 @@ use burn::{
 use crate::{
     decoder::{GraphTransformerBackwardMapper, GraphTransformerBackwardMapperConfig},
     encoder::{GraphTransformerForwardMapper, GraphTransformerForwardMapperConfig},
+    graph::GraphData,
+    named_node_attributes::{NamedNodeAttributes, NamedNodeAttributesConfig},
     transformer::{TransformerProcessor, TransformerProcessorConfig},
 };
 
 #[derive(Config, Debug)]
 struct AifsV2Config {
-    input_dim: usize,
-    input_dim_latent: usize,
     num_channels: usize,
+    num_input_channels: usize,
+    num_output_channels: usize,
+
+    multistep: usize,
 
     #[config(default = 4.)]
     mlp_hidden_ratio: f64,
@@ -27,7 +31,7 @@ struct AifsV2Config {
 
 #[derive(Module, Debug)]
 struct AifsV2<B: Backend> {
-    named_attribute: Linear<B>,
+    named_attribute: NamedNodeAttributes<B>,
     encoder: GraphTransformerForwardMapper<B>,
     proc: TransformerProcessor<B>,
     decoder: GraphTransformerBackwardMapper<B>,
@@ -35,34 +39,34 @@ struct AifsV2<B: Backend> {
 
 impl AifsV2Config {
     // FIXME(saiputravu): Fill these out correctly.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> AifsV2<B> {
-        let named_attribute = LinearConfig::new(1, 1).init(device);
+    pub fn init<B: Backend>(&self, graph_data: &GraphData<B>, device: &B::Device) -> AifsV2<B> {
+        let named_attribute =
+            NamedNodeAttributesConfig::new(self.trainable_size).init(graph_data, device);
+
+        let input_dim = (self.multistep * self.num_input_channels)
+            + ((2 * graph_data.num_data_attr) + self.trainable_size);
+        let input_dim_latent = (2 * graph_data.num_hidden_attr) + self.trainable_size;
+
         let encoder = GraphTransformerForwardMapperConfig::new(
-            self.input_dim,
-            self.input_dim_latent,
+            input_dim,
+            input_dim_latent,
             self.num_channels,
             self.mlp_hidden_ratio,
             self.num_heads,
-            0,
-            0,
-            0,
             self.trainable_size,
         )
-        .init(device);
+        .init(graph_data, device);
         let proc = TransformerProcessorConfig::new(self.num_channels, 0, 0, 0, 0).init(device);
         let decoder = GraphTransformerBackwardMapperConfig::new(
             self.num_channels,
-            self.input_dim,
-            0,
+            input_dim,
+            self.num_output_channels,
             self.num_channels,
             self.mlp_hidden_ratio,
             self.num_heads,
-            0,
-            0,
-            0,
             self.trainable_size,
         )
-        .init(device);
+        .init(graph_data, device);
         AifsV2 {
             named_attribute,
             encoder,

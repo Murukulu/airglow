@@ -6,17 +6,17 @@ use burn_store::ModuleSnapshot;
 type TestBackend = burn::backend::wgpu::Wgpu;
 
 // Small, deliberately distinct widths. hidden_dim (8) != in_channels_dst (5) != out_channels_dst
-// (3) so that a mixed-up dimension cannot accidentally typecheck, and edge_dim (6) is split as
-// 4 base attributes + 2 trainable, mirroring the real 3 + 8 = 11.
+// (3) so that a mixed-up dimension cannot accidentally typecheck.
+//
+// edge_dim is no longer a config field -- the mapper derives it as EDGE_BASE + TRAINABLE = 6 from
+// the graph it is handed, mirroring the real 3 + 8 = 11.
 const IN_SRC: usize = 8; // must equal HIDDEN -- see param_paths_and_shapes_match_checkpoint
 const IN_DST: usize = 5;
 const OUT_DST: usize = 3;
 const HIDDEN: usize = 8;
 const HEADS: usize = 2;
-const ATTN: usize = 8;
 const EDGE_BASE: usize = 4;
 const TRAINABLE: usize = 2;
-const EDGE_DIM: usize = EDGE_BASE + TRAINABLE;
 
 const N_SRC: usize = 3;
 const N_DST: usize = 2;
@@ -24,7 +24,7 @@ const E: usize = 3;
 
 fn small_config() -> GraphTransformerBackwardMapperConfig {
     GraphTransformerBackwardMapperConfig::new(
-        IN_SRC, IN_DST, OUT_DST, HIDDEN, 2.0, HEADS, ATTN, EDGE_DIM, E, TRAINABLE,
+        IN_SRC, IN_DST, OUT_DST, HIDDEN, 2.0, HEADS, TRAINABLE,
     )
 }
 
@@ -36,22 +36,51 @@ fn ramp(rows: usize, cols: usize, device: &Device<TestBackend>) -> Tensor<TestBa
         * 0.1
 }
 
-// Destination-sorted bipartite graph: src 0,1 -> dst 0 and src 2 -> dst 1.
-fn small_edges(device: &Device<TestBackend>) -> EdgeIndex<TestBackend> {
-    EdgeIndex {
-        src: Tensor::from_ints([0, 1, 2], device),
-        dst: Tensor::from_ints([0, 0, 1], device),
-        num_src: N_SRC,
-        num_dst: N_DST,
+// The mapper reads its edges from GraphData at init rather than taking them per forward call, so
+// the tests build one. Only the hidden -> data half is read by the backward mapper; the data ->
+// hidden half and the node coordinates are correctly-ranked placeholders.
+//
+// dir_cols is a parameter because EDGE_BASE here is split 1 length + 3 dirs, keeping the derived
+// edge_dim distinct from the other widths, whereas the real model is 1 + 2 = 3.
+fn decoder_graph(
+    num_hidden_nodes: usize,
+    num_data_nodes: usize,
+    src: &[i64],
+    dst: &[i64],
+    dir_cols: usize,
+    device: &Device<TestBackend>,
+) -> GraphData<TestBackend> {
+    assert_eq!(src.len(), dst.len(), "src and dst must name the same edges");
+    let edges = src.len();
+    let ints = |v: &[i64]| {
+        Tensor::<TestBackend, 1, Int>::from_data(TensorData::new(v.to_vec(), [v.len()]), device)
+    };
+
+    GraphData {
+        data_x: Tensor::zeros([num_data_nodes, 2], device),
+        hidden_x: Tensor::zeros([num_hidden_nodes, 2], device),
+
+        // Unused by the backward mapper, present only to satisfy the struct.
+        data_to_hidden_edge_index: Tensor::zeros([2, 1], device),
+        data_to_hidden_edge_direction: Tensor::zeros([1, dir_cols], device),
+        data_to_hidden_edge_length: Tensor::zeros([1, 1], device),
+
+        hidden_to_data_edge_index: Tensor::stack::<2>(vec![ints(src), ints(dst)], 0),
+        hidden_to_data_edge_direction: ramp(edges, dir_cols, device),
+        hidden_to_data_edge_length: ramp(edges, 1, device),
+
+        data_area_weight: Tensor::zeros([num_data_nodes, 1], device),
+        num_data_nodes,
+        num_hidden_nodes,
+        // Coordinate width of data_x / hidden_x above: [lat, lon], as in the real graph.
+        num_data_attr: 2,
+        num_hidden_attr: 2,
     }
 }
 
-fn edge_inc(
-    n_src: usize,
-    n_dst: usize,
-    device: &Device<TestBackend>,
-) -> Tensor<TestBackend, 2, Int> {
-    Tensor::from_ints([[n_src as i64], [n_dst as i64]], device)
+// Destination-sorted bipartite graph: src 0,1 -> dst 0 and src 2 -> dst 1.
+fn small_graph(device: &Device<TestBackend>) -> GraphData<TestBackend> {
+    decoder_graph(N_SRC, N_DST, &[0, 1, 2], &[0, 0, 1], EDGE_BASE - 1, device)
 }
 
 // The load-bearing shape contract of the backward mapper: it consumes a pair and returns a single
@@ -64,13 +93,11 @@ fn edge_inc(
 #[test]
 fn forward_maps_dst_to_out_channels_dst() {
     let device = Default::default();
-    let mapper: GraphTransformerBackwardMapper<TestBackend> = small_config().init(&device);
+    let mapper: GraphTransformerBackwardMapper<TestBackend> =
+        small_config().init(&small_graph(&device), &device);
 
     let out = mapper.forward(
         (ramp(N_SRC, IN_SRC, &device), ramp(N_DST, IN_DST, &device)),
-        ramp(E, EDGE_BASE, &device),
-        small_edges(&device),
-        edge_inc(N_SRC, N_DST, &device),
         1,
     );
 
@@ -96,12 +123,16 @@ fn forward_maps_dst_to_out_channels_dst() {
 #[test]
 fn param_paths_and_shapes_match_checkpoint() {
     let device = Default::default();
-    // in_src, in_dst, out_dst, hidden, mlp_ratio, heads, attn, edge_dim, num_edges, trainable.
-    // num_edges is 4 rather than the real 1_626_240 -- allocating the real trainable tensor in a
-    // unit test buys nothing, and no assertion below depends on it.
+    // Both the trainable tensor and edge_dim are sized from the graph rather than from config, so
+    // the graph carries 4 edges rather than the real 1_626_240 -- allocating that in a unit test
+    // buys nothing, and the only assertion that depends on it is `trainable.trainable [4, 8]`. Its
+    // 1 length + 2 dirs is the real split, which is what makes lin_edge come out at 3 + 8 = 11.
+    let graph = decoder_graph(4, 4, &[0, 1, 2, 3], &[0, 0, 1, 2], 2, &device);
+
+    // in_src, in_dst, out_dst, hidden, mlp_ratio, heads, trainable.
     let mapper: GraphTransformerBackwardMapper<TestBackend> =
-        GraphTransformerBackwardMapperConfig::new(1024, 224, 120, 1024, 4.0, 16, 1024, 11, 4, 8)
-            .init(&device);
+        GraphTransformerBackwardMapperConfig::new(1024, 224, 120, 1024, 4.0, 16, 8)
+            .init(&graph, &device);
 
     let mut got: Vec<String> = mapper
         .collect(None, None, true)
@@ -150,13 +181,14 @@ fn param_paths_and_shapes_match_checkpoint() {
 //
 // TrainableTensor tiles the base edge attributes batch_size times along dim 0 and concatenates the
 // tiled trainable block along dim 1; expand_edges tiles the edge list and offsets each copy by
-// i * edge_inc, with graph::cat summing num_src / num_dst across copies. The two must agree on
-// batch-major ordering. graph_tranformer_conv asserts its node counts against edge_index.num_src /
-// num_dst, so a disagreement panics here rather than silently mixing batches together.
+// i * edge_inc. The two must agree on batch-major ordering. graph_tranformer_conv asserts its node
+// counts -- which the mapper scales as n_{src,dst}_base * batch_size -- against the node tensors it
+// is handed, so a disagreement panics here rather than silently mixing batches together.
 #[test]
 fn batch_size_two_expands_edges_and_trainable() {
     let device = Default::default();
-    let mapper: GraphTransformerBackwardMapper<TestBackend> = small_config().init(&device);
+    let mapper: GraphTransformerBackwardMapper<TestBackend> =
+        small_config().init(&small_graph(&device), &device);
 
     // Nodes are supplied for the whole batch; edges and edge attributes are per-batch and tiled.
     let out = mapper.forward(
@@ -164,9 +196,6 @@ fn batch_size_two_expands_edges_and_trainable() {
             ramp(2 * N_SRC, IN_SRC, &device),
             ramp(2 * N_DST, IN_DST, &device),
         ),
-        ramp(E, EDGE_BASE, &device),
-        small_edges(&device),
-        edge_inc(N_SRC, N_DST, &device),
         2,
     );
 
@@ -188,34 +217,37 @@ fn batch_size_two_expands_edges_and_trainable() {
 #[test]
 fn zero_degree_destination_is_isolated_and_finite() {
     let device = Default::default();
+    // Three destinations, but no edge names destination 2.
+    let graph = decoder_graph(N_SRC, 3, &[0, 1, 2], &[0, 0, 1], EDGE_BASE - 1, &device);
     let mapper: GraphTransformerBackwardMapper<TestBackend> =
         GraphTransformerBackwardMapperConfig::new(
-            IN_SRC, IN_DST, OUT_DST, HIDDEN, 2.0, HEADS, ATTN, EDGE_DIM, E, TRAINABLE,
+            IN_SRC, IN_DST, OUT_DST, HIDDEN, 2.0, HEADS, TRAINABLE,
         )
-        .init(&device);
-
-    // Three destinations, but no edge names destination 2.
-    let edges = EdgeIndex {
-        src: Tensor::from_ints([0, 1, 2], &device),
-        dst: Tensor::from_ints([0, 0, 1], &device),
-        num_src: N_SRC,
-        num_dst: 3,
-    };
+        .init(&graph, &device);
 
     let x = (ramp(N_SRC, IN_SRC, &device), ramp(3, IN_DST, &device));
-    let inc = edge_inc(N_SRC, 3, &device);
 
-    let run = |edge_attr: Tensor<TestBackend, 2>| {
-        mapper
-            .forward(x.clone(), edge_attr, edges.clone(), inc.clone(), 1)
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()
-    };
+    // The edge attributes now live on the mapper, so perturbing them means mutating the field
+    // between the two runs. Do NOT reach for `mapper.clone()` here: Burn initialises Param lazily,
+    // so cloning before the first forward materialises re-draws every Linear, and the two runs
+    // would differ for reasons that have nothing to do with the edges.
+    let mut mapper = mapper;
+    let base_edge_attr = mapper.edge_attr.clone();
 
-    let baseline = run(ramp(E, EDGE_BASE, &device));
-    // Same graph, wildly different edge attributes on the edges into destinations 0 and 1.
-    let perturbed = run(ramp(E, EDGE_BASE, &device) * 25.0 - 7.0);
+    let baseline = mapper
+        .forward(x.clone(), 1)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    // Same graph and same weights, wildly different attributes on the edges into destinations
+    // 0 and 1.
+    mapper.edge_attr = base_edge_attr * 25.0 - 7.0;
+    let perturbed = mapper
+        .forward(x.clone(), 1)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
 
     assert_eq!(baseline.len(), 3 * OUT_DST);
     for v in baseline.iter().chain(perturbed.iter()) {
@@ -238,3 +270,4 @@ fn zero_degree_destination_is_isolated_and_finite() {
         "destination 0 did not respond to its own edge attributes -- the test proves nothing"
     );
 }
+
