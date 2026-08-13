@@ -95,14 +95,9 @@ impl GraphTransformerProcessorBlockConfig {
             LinearConfig::new(self.edge_dim, self.num_heads * out_channels_conv).init(device);
 
         // Setup MLPs.
-        let node_dst_mlp = MultiLayerPreceptronConfig::new(
-            self.out_channels,
-            self.out_channels,
-            self.hidden_dim,
-            0,
-            false,
-        )
-        .init(device);
+        let node_dst_mlp =
+            MultiLayerPreceptronConfig::new(self.out_channels, self.out_channels, self.hidden_dim)
+                .init(device);
 
         // Setup final projection.
         let projection = LinearConfig::new(self.attn_channels, self.out_channels).init(device);
@@ -115,8 +110,6 @@ impl GraphTransformerProcessorBlockConfig {
                         self.out_channels,
                         self.out_channels,
                         self.hidden_dim,
-                        0,
-                        false,
                     )
                     .init(device),
                 ),
