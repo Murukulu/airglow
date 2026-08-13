@@ -10,7 +10,7 @@ use crate::{
 };
 
 #[derive(Config, Debug)]
-struct GraphTransformerBackwardMapperConfig {
+pub struct GraphTransformerBackwardMapperConfig {
     in_channels_src: usize,
     in_channels_dst: usize,
     out_channels_dst: usize,
@@ -33,7 +33,7 @@ struct GraphTransformerBackwardMapperConfig {
 }
 
 #[derive(Module, Debug)]
-struct GraphTransformerBackwardMapper<B: Backend> {
+pub struct GraphTransformerBackwardMapper<B: Backend> {
     node_data_extractor_norm: LayerNorm<B>,
     node_data_extractor: Linear<B>,
     emb_nodes_dst: Linear<B>,
