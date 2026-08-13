@@ -7,6 +7,7 @@ mod common;
 mod decoder;
 mod encoder;
 mod graph;
+mod named_node_attributes;
 mod transformer;
 
 #[derive(Module, Debug)]
