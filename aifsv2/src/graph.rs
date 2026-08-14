@@ -101,6 +101,63 @@ impl<B: Backend> GraphData<B> {
             ),
         })
     }
+
+    /// A small graph with the real feature widths but a token number of nodes and edges.
+    ///
+    /// The real graph is unusable for a smoke test: 1,626,240 decoder edges projected to 1024
+    /// channels is a 6.7 GB activation, and graph_tranformer_conv holds four of those at once.
+    /// This keeps the geometry (2 coordinate columns, 2 direction columns, 1 length column, so
+    /// edge_dim comes out 11 exactly as in the checkpoint) and shrinks only the counts.
+    ///
+    /// Each hidden node is connected to every data node in both directions, which is dense but
+    /// harmless at this size, and guarantees every node has at least one incident edge -- an
+    /// isolated destination node would take the zero row out of the scatter and hide a bug.
+    ///
+    /// Attributes ramp rather than being constant: a LayerNorm over a constant row is 0 whatever
+    /// the weights are, so constants would mask a mis-loaded norm.
+    pub fn synthetic(num_data_nodes: usize, num_hidden_nodes: usize, device: &B::Device) -> Self {
+        let ramp = |rows: usize, cols: usize| {
+            Tensor::<B, 1, Int>::arange(0..(rows * cols) as i64, device)
+                .float()
+                .reshape([rows, cols])
+                * 0.1
+        };
+        // A complete bipartite edge list, [2, E], src in row 0 and dst in row 1.
+        let edges = |num_src: usize, num_dst: usize| {
+            let src: Vec<i64> = (0..num_src)
+                .flat_map(|s| std::iter::repeat_n(s as i64, num_dst))
+                .collect();
+            let dst: Vec<i64> = (0..num_src).flat_map(|_| 0..num_dst as i64).collect();
+            let ints = |v: Vec<i64>| {
+                let n = v.len();
+                Tensor::<B, 1, Int>::from_data(TensorData::new(v, [n]), device)
+            };
+            Tensor::stack::<2>(vec![ints(src), ints(dst)], 0)
+        };
+
+        let num_encoder_edges = num_data_nodes * num_hidden_nodes;
+        let num_decoder_edges = num_hidden_nodes * num_data_nodes;
+
+        GraphData {
+            data_x: ramp(num_data_nodes, 2),
+            hidden_x: ramp(num_hidden_nodes, 2),
+
+            data_to_hidden_edge_index: edges(num_data_nodes, num_hidden_nodes),
+            data_to_hidden_edge_direction: ramp(num_encoder_edges, 2),
+            data_to_hidden_edge_length: ramp(num_encoder_edges, 1),
+
+            hidden_to_data_edge_index: edges(num_hidden_nodes, num_data_nodes),
+            hidden_to_data_edge_direction: ramp(num_decoder_edges, 2),
+            hidden_to_data_edge_length: ramp(num_decoder_edges, 1),
+
+            data_area_weight: Tensor::ones([num_data_nodes, 1], device),
+            num_data_nodes,
+            num_hidden_nodes,
+            // Coordinate width of data_x / hidden_x above: [lat, lon], as in the real graph.
+            num_data_attr: 2,
+            num_hidden_attr: 2,
+        }
+    }
 }
 
 // From a starting edge_index, we increment known edges by some edge_inc. We expand

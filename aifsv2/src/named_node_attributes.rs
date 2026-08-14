@@ -28,7 +28,7 @@ impl NamedNodeAttributesTrainableTensorsConfig {
     }
 }
 
-enum TensorType {
+pub enum TensorType {
     Data,
     Hidden,
 }
@@ -71,8 +71,10 @@ impl NamedNodeAttributesConfig {
                 [graph_data.num_data_nodes, graph_data.num_data_attr * 2],
                 device,
             )),
+            // Two columns per coordinate: the checkpoint stores latlons as
+            // [sin_lat, sin_lon, cos_lat, cos_lon], not raw degrees.
             latlons_hidden: Param::from_tensor(Tensor::zeros(
-                [graph_data.num_hidden_nodes, graph_data.num_hidden_nodes * 2],
+                [graph_data.num_hidden_nodes, graph_data.num_hidden_attr * 2],
                 device,
             )),
             trainable_tensors,

@@ -270,4 +270,3 @@ fn zero_degree_destination_is_isolated_and_finite() {
         "destination 0 did not respond to its own edge attributes -- the test proves nothing"
     );
 }
-
