@@ -225,6 +225,7 @@ impl<B: Backend> AifsV2<B> {
 ///
 /// PyTorchToBurnAdapter dispatches on the container type, so its [out, in] -> [in, out] transpose
 /// only touches real Linear weights and its weight/bias -> gamma/beta rename only LayerNorms.
+///
 /// TrainableTensor.trainable and the latlons params are left alone. (This is why the *graph* store
 /// must not use the adapter: those are raw arrays with no container type to dispatch on.)
 ///

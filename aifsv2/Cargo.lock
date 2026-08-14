@@ -523,6 +523,7 @@ dependencies = [
  "burn-train",
  "burn-vision",
  "burn-wgpu",
+ "cubecl",
 ]
 
 [[package]]

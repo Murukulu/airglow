@@ -220,7 +220,9 @@ fn forward_smoke_test(metadata: &Metadata, device: &Device<MyBackend>) {
 
     // Note: do not clone the model before this call. Burn's Param is lazily initialised, so a
     // clone re-draws every Linear.
+    let before = memory_usage(device);
     let out = model.forward(x);
+    let after = memory_usage(device);
 
     let dims = out.shape().dims::<2>();
     assert_eq!(dims, [NUM_DATA_NODES, metadata.model_output.full.len()]);
@@ -228,4 +230,26 @@ fn forward_smoke_test(metadata: &Metadata, device: &Device<MyBackend>) {
         "\nsynthetic forward ({NUM_DATA_NODES} data / {NUM_HIDDEN_NODES} hidden nodes, {SMALL_NUM_CHANNELS} channels)"
     );
     println!("  out {:?}, mean {}", dims, out.mean().into_scalar());
+    println!(
+        "  device memory: {} reserved before, {} after (peak allocs {})",
+        mib(before.bytes_reserved),
+        mib(after.bytes_reserved),
+        after.number_allocs,
+    );
+}
+
+// GPU allocator stats from the CubeCL memory pool. `bytes_reserved` is what the pool has claimed
+// from the driver and will reuse, so it is a high-water mark rather than a live set -- which is
+// the number that decides whether a given graph size fits.
+fn memory_usage(device: &Device<MyBackend>) -> burn::cubecl::MemoryUsage {
+    use burn::backend::wgpu::WgpuRuntime;
+    use burn::cubecl::Runtime;
+
+    WgpuRuntime::client(device)
+        .memory_usage()
+        .expect("wgpu client did not report memory usage")
+}
+
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
