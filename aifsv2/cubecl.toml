@@ -1,0 +1,16 @@
+# CubeCL runtime config, picked up automatically from the working directory.
+#
+# Profiling is off by default. Flip `level` to "medium" to get a per-kernel table
+# (count, total duration, name) printed when the process exits.
+#
+#   disabled | minimal | basic | medium | full
+#
+# Prefer this over CUBECL_DEBUG_LOG=stdout: that env var also forces the compilation
+# logger to Full, which dumps the generated WGSL for every kernel and buries the table.
+[profiling.logger]
+level = "disabled"
+stdout = true
+
+# Kept explicit so a stray CUBECL_DEBUG_LOG does not turn the WGSL firehose back on.
+[compilation.logger]
+level = "disabled"

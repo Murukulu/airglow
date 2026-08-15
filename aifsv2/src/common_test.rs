@@ -44,14 +44,19 @@ fn conv_matches_worked_example() {
     ); // [4, 1, 2]
     let edges = Tensor::<TestBackend, 3>::zeros([7, 1, 2], &device);
 
-    let edge_index = EdgeIndex {
-        src: Tensor::from_ints([0, 1, 3, 2, 0, 2, 3], &device),
-        dst: Tensor::from_ints([0, 0, 0, 1, 2, 2, 2], &device),
-        num_src: 4,
-        num_dst: 4,
-    };
+    let edge_index_src = Tensor::from_ints([0, 1, 3, 2, 0, 2, 3], &device);
+    let edge_index_dst = Tensor::from_ints([0, 0, 0, 1, 2, 2, 2], &device);
 
-    let out = graph_tranformer_conv(query, key, value, edges, edge_index);
+    let out = graph_tranformer_conv(
+        query,
+        key,
+        value,
+        edges,
+        edge_index_src,
+        edge_index_dst,
+        4, // n_src
+        4, // n_dst
+    );
     assert_eq!(out.shape().dims::<3>(), [4, 1, 2]);
 
     // dst 0: degree 3. dst 1: degree 1, so out == v_j exactly. dst 2: degree 3.
@@ -86,14 +91,19 @@ fn conv_adds_edges_to_key_and_value() {
     let value = Tensor::<TestBackend, 3>::zeros([2, 1, 1], &device);
     let edges = Tensor::<TestBackend, 3>::from_floats([[[1.0]], [[0.0]]], &device); // [2, 1, 1]
 
-    let edge_index = EdgeIndex {
-        src: Tensor::from_ints([0, 1], &device),
-        dst: Tensor::from_ints([0, 0], &device),
-        num_src: 2,
-        num_dst: 1,
-    };
+    let edge_index_src = Tensor::from_ints([0, 1], &device);
+    let edge_index_dst = Tensor::from_ints([0, 0], &device);
 
-    let out = graph_tranformer_conv(query, key, value, edges, edge_index);
+    let out = graph_tranformer_conv(
+        query,
+        key,
+        value,
+        edges,
+        edge_index_src,
+        edge_index_dst,
+        2, // n_src
+        1, // n_dst
+    );
     assert_eq!(out.shape().dims::<3>(), [1, 1, 1]);
     assert_close(out.into_data().to_vec::<f32>().unwrap(), &[0.7310586], 1e-5);
 }
