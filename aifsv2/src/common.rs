@@ -5,8 +5,6 @@ use burn::{
     tensor::IndexingUpdateOp,
 };
 
-use crate::graph::EdgeIndex;
-
 pub type PairTensor<B, const D: usize> = (Tensor<B, D>, Tensor<B, D>);
 
 // Note: This is a lazy implementation of the MLP implemented in Anemoi.
@@ -159,11 +157,14 @@ pub fn sparse_segment_softmax<B: Backend>(
 //
 // TODO(putravu): Comment formatting make everything the same line length and pick one and stick to it.
 pub fn graph_tranformer_conv<B: Backend>(
-    query: Tensor<B, 3>, // [N_dst, H, C]
-    key: Tensor<B, 3>,   // [N_src, H, C]
-    value: Tensor<B, 3>, // [N_src, H, C]
-    edges: Tensor<B, 3>, // [E, H, C]
-    edge_index: EdgeIndex<B>,
+    query: Tensor<B, 3>,               // [N_dst, H, C]
+    key: Tensor<B, 3>,                 // [N_src, H, C]
+    value: Tensor<B, 3>,               // [N_src, H, C]
+    edges: Tensor<B, 3>,               // [E, H, C]
+    edge_index_src: Tensor<B, 1, Int>, // [E]
+    edge_index_dst: Tensor<B, 1, Int>, // [E]
+    n_src: usize,                      // Number of actual nodes in src
+    n_dst: usize,                      // Number of actual nodes in dst
 ) -> Tensor<B, 3> {
     // We take the number of channels, inverse rooted. This is the attention normalisation
     // constant. I compute this value ahead of time, as we would prefer to keep higher
@@ -171,20 +172,20 @@ pub fn graph_tranformer_conv<B: Backend>(
     // small numbers.
     //
     // TODO(putravu): cite this.
-    let [n_dst, h, c] = query.shape().dims::<3>();
+    let [_n_dst, h, c] = query.shape().dims::<3>();
+    let _n_src = key.shape().dims::<3>()[0];
     let norm = 1. / f64::sqrt(c as f64);
-    let dst = edge_index.clone().dst; // [E]
-    let src = edge_index.clone().src; // [E]
-    let n_src = key.shape().dims::<3>()[0];
+
+    // TODO(putravu): This is probably slow? Do we need to slice here...
     assert_eq!(
-        n_dst, edge_index.num_dst,
+        _n_dst, n_dst,
         "found n_dst: {} but expected: {}",
-        n_dst, edge_index.num_dst
+        _n_dst, n_dst
     );
     assert_eq!(
-        n_src, edge_index.num_src,
+        _n_src, n_src,
         "found n_src: {}, expected: {}",
-        n_src, edge_index.num_src
+        _n_src, n_src
     );
 
     assert_eq!(
@@ -193,11 +194,12 @@ pub fn graph_tranformer_conv<B: Backend>(
         "key and value are different shapes"
     );
 
-    // These tensors are now all of shape [E, H, C] since .dst and .src are of length E. See EdgeIndex comments for more
-    // information.
-    let q_i = query.select(0, dst.clone());
-    let k_j = key.select(0, src.clone()) + edges.clone();
-    let v_j = value.select(0, src) + edges.clone();
+    // The gathers move from the node domain to the edge domain: edge_index_src and edge_index_dst
+    // both have length E, so all three tensors below come out [E, H, C], one row per edge rather
+    // than one per node.
+    let q_i = query.select(0, edge_index_dst.clone());
+    let k_j = key.select(0, edge_index_src.clone()) + edges.clone();
+    let v_j = value.select(0, edge_index_src) + edges.clone();
 
     // Here, we do element-wise multiplication. Burn here treats the last two dimensions
     // as the matrix and the former dims as batches. This means that they get ignored.
@@ -209,7 +211,7 @@ pub fn graph_tranformer_conv<B: Backend>(
 
     // Here, we compute the softmax for edges across the destination-domain. Here, alpha is [E, H, 1].
     // So we take the softmax of each alpha over the sum of groupings defined by dst indexer.
-    let alpha = sparse_segment_softmax(alpha, dst.clone(), n_dst);
+    let alpha = sparse_segment_softmax(alpha, edge_index_dst.clone(), n_dst);
 
     // This is equivalent to computing the final output representation as defined in the paper. Here, the v_j
     // component has shape [E, H, C] whereas alpha has shape [E, H, 1]. This means the multiplication happens at
@@ -218,7 +220,12 @@ pub fn graph_tranformer_conv<B: Backend>(
 
     // We scatter along the destination-domain indicies for message. So this convolution results in the destination
     // domain (i.e. convolve from source nodes -> destination nodes and encode features with importance).
-    Tensor::zeros([n_dst, h, c], &edges.device()).select_assign(0, dst, msg, IndexingUpdateOp::Add)
+    Tensor::zeros([n_dst, h, c], &edges.device()).select_assign(
+        0,
+        edge_index_dst,
+        msg,
+        IndexingUpdateOp::Add,
+    )
 }
 
 #[derive(Config, Debug)]

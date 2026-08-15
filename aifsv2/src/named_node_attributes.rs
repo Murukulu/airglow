@@ -1,6 +1,9 @@
 use burn::{module::Param, prelude::*};
 
-use crate::common::{TrainableTensor, TrainableTensorConfig};
+use crate::{
+    common::{TrainableTensor, TrainableTensorConfig},
+    graph::GraphData,
+};
 
 #[derive(Config, Debug)]
 struct NamedNodeAttributesTrainableTensorsConfig {
@@ -25,7 +28,7 @@ impl NamedNodeAttributesTrainableTensorsConfig {
     }
 }
 
-enum TensorType {
+pub enum TensorType {
     Data,
     Hidden,
 }
@@ -39,14 +42,12 @@ impl<B: Backend> NamedNodeAttributesTrainableTensors<B> {
 }
 
 #[derive(Config, Debug)]
-struct NamedNodeAttributesConfig {
+pub struct NamedNodeAttributesConfig {
     num_trainable_params: usize,
-    data_tensor_size: usize,
-    hidden_tensor_size: usize,
 }
 
 #[derive(Module, Debug)]
-struct NamedNodeAttributes<B: Backend> {
+pub struct NamedNodeAttributes<B: Backend> {
     latlons_data: Param<Tensor<B, 2>>,
     latlons_hidden: Param<Tensor<B, 2>>,
     trainable_tensors: NamedNodeAttributesTrainableTensors<B>,
@@ -56,19 +57,26 @@ struct NamedNodeAttributes<B: Backend> {
 impl NamedNodeAttributesConfig {
     pub fn init<B: Backend>(
         &self,
+        graph_data: &GraphData<B>,
         device: &B::Device,
-        latlons_data_tensor: Tensor<B, 2>,
-        latlons_hidden_tensor: Tensor<B, 2>,
     ) -> NamedNodeAttributes<B> {
         let trainable_tensors = NamedNodeAttributesTrainableTensorsConfig::new(
-            self.data_tensor_size,
-            self.hidden_tensor_size,
+            graph_data.num_data_nodes,
+            graph_data.num_hidden_nodes,
             self.num_trainable_params,
         )
         .init(device);
         NamedNodeAttributes {
-            latlons_data: Param::from_tensor(latlons_data_tensor).to_device(device),
-            latlons_hidden: Param::from_tensor(latlons_hidden_tensor).to_device(device),
+            latlons_data: Param::from_tensor(Tensor::zeros(
+                [graph_data.num_data_nodes, graph_data.num_data_attr * 2],
+                device,
+            )),
+            // Two columns per coordinate: the checkpoint stores latlons as
+            // [sin_lat, sin_lon, cos_lat, cos_lon], not raw degrees.
+            latlons_hidden: Param::from_tensor(Tensor::zeros(
+                [graph_data.num_hidden_nodes, graph_data.num_hidden_attr * 2],
+                device,
+            )),
             trainable_tensors,
         }
     }

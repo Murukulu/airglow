@@ -268,7 +268,7 @@ impl TransformerProcessorConfig {
 }
 
 impl<B: Backend> TransformerProcessor<B> {
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let mut x = x;
         for b in self.proc.iter() {
             x = b.forward(x);
