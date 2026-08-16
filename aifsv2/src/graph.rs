@@ -48,7 +48,7 @@ pub struct GraphData<B: Backend> {
 }
 
 // Snapshots are lazy — to_data is where the bytes are actually read.
-fn snapshot(store: &mut SafetensorsStore, name: &str) -> Result<TensorData, String> {
+pub(crate) fn snapshot(store: &mut SafetensorsStore, name: &str) -> Result<TensorData, String> {
     store
         .get_snapshot(name)
         .map_err(|e| format!("reading {name}: {e}"))?
