@@ -1,5 +1,6 @@
 use burn::{backend::wgpu, prelude::*};
 use burn_store::{ModuleSnapshot, SafetensorsStore};
+use chrono::{TimeZone, Utc};
 
 use std::path::Path;
 
@@ -10,6 +11,7 @@ mod block;
 mod common;
 mod decoder;
 mod encoder;
+mod forcings;
 mod graph;
 mod metadata;
 mod named_node_attributes;
@@ -62,6 +64,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     load_checkpoint(&metadata, &graph_data, &device)?;
     forward_smoke_test(&metadata, &device);
+    forcings_smoke_test(&metadata, &device)?;
+
+    Ok(())
+}
+
+// Nine of the fourteen forcings are pure functions of (date, lat, lon), so they can be computed
+// on the real grid before any GRIB reading exists. Run them once to confirm they hold up at
+// 542,080 points rather than at the five points forcings_test.rs checks against earthkit.
+//
+// The date is arbitrary -- there is no input data to match yet. A solstice at 00Z is the most
+// informative choice: the day/night terminator is at its most extreme, and 00Z is the hour whose
+// (hour - 12) hour angle is furthest negative.
+fn forcings_smoke_test(
+    metadata: &Metadata,
+    device: &Device<MyBackend>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let date = Utc.with_ymd_and_hms(2024, 6, 21, 0, 0, 0).unwrap();
+
+    let to_tensor = |degrees: &[f64]| {
+        let values: Vec<f32> = degrees.iter().map(|&v| v as f32).collect();
+        Tensor::<MyBackend, 1>::from_floats(values.as_slice(), device)
+    };
+    let lat = to_tensor(&metadata.latitudes);
+    let long = to_tensor(&metadata.longitudes);
+
+    let forcings = forcings::compute_forcings(lat, long, &date)?;
+
+    // Night is exactly 0, never negative -- earthkit clips, and the checkpoint was trained on
+    // clipped values. A negative here would be a sign error that normalisation would happily
+    // carry all the way into the forecast.
+    let sunlit = forcings
+        .insolation
+        .clone()
+        .greater_elem(0.0)
+        .int()
+        .sum()
+        .into_scalar();
+
+    println!(
+        "\ncomputed forcings at {date} over {} grid points",
+        metadata.latitudes.len(),
+    );
+    for (name, values) in [
+        ("sin_latitude", forcings.sin_latitude),
+        ("cos_latitude", forcings.cos_latitude),
+        ("sin_longitude", forcings.sin_longitude),
+        ("cos_longitude", forcings.cos_longitude),
+        // The two julian_day rows are constant across the grid, so their range collapses.
+        ("sin_julian_day", forcings.sin_julian_day),
+        ("cos_julian_day", forcings.cos_julian_day),
+        ("sin_local_time", forcings.sin_local_time),
+        ("cos_local_time", forcings.cos_local_time),
+        ("insolation", forcings.insolation),
+    ] {
+        let min = values.clone().min().into_scalar();
+        let max = values.max().into_scalar();
+        assert!(
+            min.is_finite() && max.is_finite(),
+            "{name} is not finite at {date}: [{min}, {max}]",
+        );
+        if name == "insolation" {
+            assert!(min >= 0.0, "insolation went negative ({min}) at {date}");
+            println!("  {name:<15} [{min}, {max}], {sunlit} points sunlit");
+        } else {
+            println!("  {name:<15} [{min}, {max}]");
+        }
+    }
 
     Ok(())
 }
