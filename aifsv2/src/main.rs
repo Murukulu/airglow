@@ -13,6 +13,7 @@ mod decoder;
 mod encoder;
 mod forcings;
 mod graph;
+mod grib;
 mod metadata;
 mod named_node_attributes;
 mod transformer;
@@ -22,11 +23,15 @@ type MyBackend = wgpu::Wgpu;
 const METADATA_DIR: &str = "./data/aifs-single-mse-2.0/quiet_grub/anemoi-metadata";
 const GRAPH_PATH: &str = "./data/aifs-single-mse-2.0_graph.safetensors";
 const CHECKPOINT_PATH: &str = "./data/aifs-single-mse-2.0.safetensors";
+const OPER_PATH: &str = "./data/20260810000000-0h-oper-fc.grib2";
 
 // config.model.num_channels, the latent width. Metadata does not parse it out of the raw JSON.
 const NUM_CHANNELS: usize = 1024;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    crate::grib::load_grib(OPER_PATH);
+    return Ok(());
+
     let device: Device<MyBackend> = Default::default();
 
     let metadata = Metadata::load(Path::new(METADATA_DIR))?;

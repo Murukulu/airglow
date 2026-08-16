@@ -1,0 +1,16 @@
+# Both keys are rust-analyzer defaults. Pinning them here overrides a contributor's global
+# editor settings, which is worth doing because this crate is unusable in an editor without
+# them.
+
+[cargo.buildScripts]
+# Run each dependency's build.rs and feed its output back to the analyzer. wgpu's dependency
+# tree generates code and sets cfg flags at build time, so with this off every cfg-gated item
+# reads as unresolved.
+enable = true
+
+[procMacro]
+# Expand derive macros. Burn's #[derive(Module)] and #[derive(Config)] generate the bulk of
+# each layer's API — Config::new, .init, the Module impl — as does serde's #[derive(Deserialize)]
+# in metadata.rs. Unexpanded, those are invisible: no completions, no go-to-definition, and
+# false errors on every call into them.
+enable = true

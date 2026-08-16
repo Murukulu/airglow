@@ -269,7 +269,7 @@ It is a free config field (`encoder.rs:269`), but it is determined: 3 (`edge_len
 - `trainable_size` (8) = 11, matching `lin_edge.weight [1024, 11]`. Derive it inside
   `GraphTransformerForwardMapperConfig` from a base-attribute width and `trainable_size`, rather than
   accepting it and asserting about it — that removes the way to be inconsistent instead of detecting
-  it. Also `edge_attr_shape` (`encoder.rs:271`) means "number of edges"; `num_edges` says so.
+  it. Also `edge_attr` shape (`encoder.rs:271`) means "number of edges"; `num_edges` says so.
 
 ### 3.6 `edge_pre_mlp` does not exist in 0.9.3
 
