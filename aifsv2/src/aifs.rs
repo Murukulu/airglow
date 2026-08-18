@@ -10,23 +10,14 @@ use crate::{
     graph::GraphData,
     metadata::Metadata,
     named_node_attributes::{NamedNodeAttributes, NamedNodeAttributesConfig, TensorType},
+    processors::Processors,
     transformer::{TransformerProcessor, TransformerProcessorConfig},
 };
 
 #[derive(Config, Debug)]
 pub struct AifsV2Config {
     num_channels: usize,
-    num_input_channels: usize,
-    num_output_channels: usize,
-
-    multistep: usize,
-
-    // Channel indices for the prognostic residual. input_prognostic indexes the
-    // num_input_channels space and output_prognostic the num_output_channels space; these are
-    // different index spaces (input starts [0, 1, 2, ..], output starts [2, 3, 4, ..]) naming the
-    // same variables, so they must have the same length.
-    input_prognostic: Vec<usize>,
-    output_prognostic: Vec<usize>,
+    metadata: Metadata,
 
     #[config(default = 4.)]
     mlp_hidden_ratio: f64,
@@ -58,6 +49,9 @@ pub struct AifsV2<B: Backend> {
     // store and never show up as missing keys.
     input_prognostic: Tensor<B, 1, Int>,
     output_prognostic: Tensor<B, 1, Int>,
+
+    // Metadata
+    metadata: Metadata,
 }
 
 impl AifsV2Config {
@@ -65,31 +59,30 @@ impl AifsV2Config {
     /// config.model.num_channels in the raw checkpoint JSON, which Metadata does not parse, so it
     /// is passed in (1024 for aifs-single-mse-2.0).
     pub fn from_metadata(metadata: &Metadata, num_channels: usize) -> Self {
-        Self::new(
-            num_channels,
-            metadata.model_input.full.len(),
-            metadata.model_output.full.len(),
-            metadata.multistep,
-            metadata.model_input.prognostic.clone(),
-            metadata.model_output.prognostic.clone(),
-        )
+        Self::new(num_channels, metadata.clone())
     }
 
     pub fn init<B: Backend>(&self, graph_data: &GraphData<B>, device: &B::Device) -> AifsV2<B> {
+        let num_input_channels = self.metadata.model_input.full.len();
+        let num_output_channels = self.metadata.model_output.full.len();
+        let input_prognostic = &self.metadata.model_input.prognostic;
+        let output_prognostic = &self.metadata.model_output.prognostic;
+        let multistep = self.metadata.multistep;
+
         // A mismatch would otherwise surface as an opaque shape error inside select_assign, well
         // after the point where the configuration went wrong.
         assert_eq!(
-            self.input_prognostic.len(),
-            self.output_prognostic.len(),
+            input_prognostic.len(),
+            output_prognostic.len(),
             "input_prognostic has {} channels but output_prognostic has {}; they name the same variables",
-            self.input_prognostic.len(),
-            self.output_prognostic.len(),
+            input_prognostic.len(),
+            output_prognostic.len(),
         );
 
         let named_attribute =
             NamedNodeAttributesConfig::new(self.trainable_size).init(graph_data, device);
 
-        let input_dim = (self.multistep * self.num_input_channels)
+        let input_dim = (multistep * num_input_channels)
             + ((2 * graph_data.num_data_attr) + self.trainable_size);
         let input_dim_latent = (2 * graph_data.num_hidden_attr) + self.trainable_size;
 
@@ -113,7 +106,7 @@ impl AifsV2Config {
         let decoder = GraphTransformerBackwardMapperConfig::new(
             self.num_channels,
             input_dim,
-            self.num_output_channels,
+            num_output_channels,
             self.num_channels,
             self.mlp_hidden_ratio,
             self.num_heads,
@@ -136,8 +129,10 @@ impl AifsV2Config {
             encoder,
             proc,
             decoder,
-            input_prognostic: indices(&self.input_prognostic),
-            output_prognostic: indices(&self.output_prognostic),
+            input_prognostic: indices(input_prognostic),
+            output_prognostic: indices(output_prognostic),
+            // TODO(saiputravu): Stop cloning this everywhere.
+            metadata: self.metadata.clone(),
         }
     }
 }
@@ -218,6 +213,16 @@ impl<B: Backend> AifsV2<B> {
         let x_out = self.decoder.forward((x_latent, x_data_latent), batch);
 
         self.assemble_output(x_out, x_skip)
+    }
+
+    /// One step end to end: the anemoi `predict_step`, pre- and post-processing included.
+    ///
+    /// `x` is `[batch, time, grid, vars]` in physical units, NaN where the source had no value.
+    /// The return is `[batch * grid, num_output_channels]`, back in physical units.
+    pub fn predict_step(&self, processors: &Processors<B>, x: Tensor<B, 4>) -> Tensor<B, 2> {
+        let pre = processors.pre(x);
+        let y_hat = self.forward(pre.x.clone());
+        processors.post(y_hat, &pre)
     }
 }
 

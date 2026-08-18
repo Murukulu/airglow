@@ -1,5 +1,10 @@
+use std::collections::HashMap;
+use std::time::Duration;
+
 use super::*;
 use burn::module::{ModuleMapper, Param};
+
+use crate::metadata::IndexSet;
 
 // wgpu rather than ndarray for the same reason as the other suites: the scatter-adds in
 // graph_tranformer_conv and in the prognostic residual both hit duplicate indices, and
@@ -23,18 +28,42 @@ const N_HIDDEN: usize = 3;
 const INPUT_PROGNOSTIC: [usize; 5] = [0, 1, 2, 3, 4];
 const OUTPUT_PROGNOSTIC: [usize; 5] = [2, 3, 4, 5, 6];
 
+// AifsV2Config carries the whole Metadata, so the test has to build one. Only the two widths,
+// multistep and the two prognostic index sets are read by init; the rest is inert here.
+fn metadata() -> Metadata {
+    let set = |full: Vec<usize>, prognostic: Vec<usize>| IndexSet {
+        full,
+        prognostic,
+        diagnostic: Vec::new(),
+        forcing: Vec::new(),
+    };
+    Metadata {
+        variables: Vec::new(),
+        multistep: MULTISTEP,
+        timestep: Duration::from_secs(6 * 60 * 60),
+        data_input: set(Vec::new(), Vec::new()),
+        data_output: set(Vec::new(), Vec::new()),
+        model_input: set((0..NUM_INPUT_CHANNELS).collect(), INPUT_PROGNOSTIC.to_vec()),
+        model_output: set((0..NUM_OUTPUT_CHANNELS).collect(), OUTPUT_PROGNOSTIC.to_vec()),
+        var_to_input_channel: HashMap::new(),
+        var_to_output_channel: HashMap::new(),
+        output_channel_to_var: Vec::new(),
+        computed_forcing: Vec::new(),
+        constant_in_time: Vec::new(),
+        imputer_zero: Vec::new(),
+        boundings: Vec::new(),
+        nan_postprocessor_reference: String::new(),
+        nan_postprocessor_vars: Vec::new(),
+        latitudes: Vec::new(),
+        longitudes: Vec::new(),
+    }
+}
+
 fn small_config() -> AifsV2Config {
-    AifsV2Config::new(
-        NUM_CHANNELS,
-        NUM_INPUT_CHANNELS,
-        NUM_OUTPUT_CHANNELS,
-        MULTISTEP,
-        INPUT_PROGNOSTIC.to_vec(),
-        OUTPUT_PROGNOSTIC.to_vec(),
-    )
-    .with_num_heads(NUM_HEADS)
-    .with_num_processor_layers(2)
-    .with_num_processor_chunks(1)
+    AifsV2Config::new(NUM_CHANNELS, metadata())
+        .with_num_heads(NUM_HEADS)
+        .with_num_processor_layers(2)
+        .with_num_processor_chunks(1)
 }
 
 fn input(batch: usize, device: &Device<TestBackend>) -> Tensor<TestBackend, 4> {

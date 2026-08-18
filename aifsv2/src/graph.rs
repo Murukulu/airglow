@@ -1,3 +1,5 @@
+use core::{error, fmt};
+
 use burn::prelude::*;
 use burn_store::{ModuleStore, SafetensorsStore};
 
@@ -47,21 +49,36 @@ pub struct GraphData<B: Backend> {
     pub num_hidden_attr: usize,
 }
 
+#[derive(Debug)]
+pub enum Error {
+    Snapshot(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Snapshot(reason) => write!(f, "snapshot issue: {}", reason),
+        }
+    }
+}
+
+impl error::Error for Error {}
+
 // Snapshots are lazy — to_data is where the bytes are actually read.
-pub(crate) fn snapshot(store: &mut SafetensorsStore, name: &str) -> Result<TensorData, String> {
+pub(crate) fn snapshot(store: &mut SafetensorsStore, name: &str) -> Result<TensorData, Error> {
     store
         .get_snapshot(name)
-        .map_err(|e| format!("reading {name}: {e}"))?
-        .ok_or_else(|| format!("missing {name}"))?
+        .map_err(|e| Error::Snapshot(format!("reading {name}: {e}")))?
+        .ok_or_else(|| Error::Snapshot(format!("missing {name}")))?
         .to_data()
-        .map_err(|e| format!("reading {name}: {e}"))
+        .map_err(|e| Error::Snapshot(format!("reading {name}: {e}")))
 }
 
 impl<B: Backend> GraphData<B> {
     pub fn from_safetensors_store(
         store: &mut SafetensorsStore,
         device: &B::Device,
-    ) -> Result<GraphData<B>, String> {
+    ) -> Result<GraphData<B>, Error> {
         let data_x = Tensor::from_data(snapshot(store, "data.x")?, device);
         let hidden_x = Tensor::from_data(snapshot(store, "hidden.x")?, device);
         let [num_data_nodes, num_data_attr] = data_x.shape().dims();
