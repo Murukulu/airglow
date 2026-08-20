@@ -9,12 +9,11 @@ use chrono::{TimeZone, Utc};
 
 use std::path::Path;
 
-use crate::{
-    aifs::AifsV2Config, graph::GraphData, metadata::Metadata, processors::Processors,
-};
+use crate::{aifs::AifsV2Config, graph::GraphData, metadata::Metadata, processors::Processors};
 
 mod aifs;
 mod block;
+mod bounding;
 mod common;
 mod decoder;
 mod encoder;
@@ -450,7 +449,9 @@ fn forward_smoke_test<B: MemoryReport>(
     let x = Tensor::<B, 4>::zeros([1, metadata.multistep, NUM_DATA_NODES, vars], device);
     let nan_channel = metadata.imputer_zero.iter().find_map(|name| {
         let input = metadata.input_channel(name)?;
-        metadata.output_channel(name).map(|output| (name, input, output))
+        metadata
+            .output_channel(name)
+            .map(|output| (name, input, output))
     });
     let x = match nan_channel {
         Some((_, input, _)) => x.slice_fill([0..1, 0..1, 0..1, input..input + 1], f32::NAN),
@@ -478,12 +479,17 @@ fn forward_smoke_test<B: MemoryReport>(
             .into_data()
             .to_vec::<f32>()
             .expect("output column is not f32");
-        assert!(column[0].is_nan(), "{name} was imputed but came back finite");
+        assert!(
+            column[0].is_nan(),
+            "{name} was imputed but came back finite"
+        );
         assert!(
             column[1..].iter().all(|v| v.is_finite()),
             "{name} went NaN at a point that was never imputed",
         );
-        println!("  {name} -> output channel {output}: NaN restored at 1 of {NUM_DATA_NODES} points");
+        println!(
+            "  {name} -> output channel {output}: NaN restored at 1 of {NUM_DATA_NODES} points"
+        );
     }
 
     println!("  out {:?}", dims);

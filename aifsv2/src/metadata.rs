@@ -9,6 +9,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::Serialize;
 
+use burn::prelude::*;
+
 #[derive(Debug)]
 pub enum Error {
     Io(PathBuf, io::Error),
@@ -55,7 +57,7 @@ pub struct IndexSet {
 // earlier entries have already clamped, so reordering these is silently wrong.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "_target_")]
-pub enum Bounding {
+pub enum BoundingConfig {
     #[serde(rename = "anemoi.models.layers.bounding.ReluBounding")]
     Relu { variables: Vec<String> },
     #[serde(rename = "anemoi.models.layers.bounding.HardtanhBounding")]
@@ -105,7 +107,7 @@ pub struct Metadata {
     pub computed_forcing: Vec<String>, // Derived from date and grid position, not retrieved.
     pub constant_in_time: Vec<String>, // Never recomputed; overlaps `computed_forcing`.
     pub imputer_zero: Vec<String>,     // Filled with 0 wherever the source data is NaN.
-    pub boundings: Vec<Bounding>,      // Output clamps, in application order.
+    pub boundings: Vec<BoundingConfig>, // Output clamps, in application order.
 
     pub nan_postprocessor_reference: String, // Reference variable for NaN masking
     pub nan_postprocessor_vars: Vec<String>, // Variables to be masked
@@ -132,7 +134,7 @@ impl Metadata {
     }
 
     // Filters names that do not work.
-    pub fn channels_of_vec(&self, channel_names: &Vec<String>, kind: ChannelKind) -> Vec<i64> {
+    pub fn channels_of_vec(&self, channel_names: &Vec<String>, kind: &ChannelKind) -> Vec<i64> {
         channel_names
             .iter()
             .filter_map(|var_name| match kind {
@@ -141,6 +143,17 @@ impl Metadata {
             })
             .map(|x| x as i64)
             .collect()
+    }
+
+    pub fn tensor_channels_of_vec<B: Backend>(
+        &self,
+        channel_names: &Vec<String>,
+        kind: &ChannelKind,
+        device: &B::Device,
+    ) -> Tensor<B, 1, Int> {
+        let vars_idx = self.channels_of_vec(channel_names, kind);
+        let n = &vars_idx.len();
+        Tensor::<B, 1, Int>::from_data(TensorData::new(vars_idx, [n]), device)
     }
 
     pub fn load(anemoi_metadata_dir: &Path) -> Result<Metadata, Error> {
@@ -305,7 +318,7 @@ struct RawConditionalNanPostProcessorConfig {
 
 #[derive(Deserialize)]
 struct RawModel {
-    bounding: Vec<Bounding>,
+    bounding: Vec<BoundingConfig>,
 }
 
 #[derive(Deserialize)]

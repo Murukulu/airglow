@@ -4,6 +4,7 @@ use burn::{prelude::*, tensor::IndexingUpdateOp};
 use burn_store::{PyTorchToBurnAdapter, SafetensorsStore};
 
 use crate::{
+    bounding::{Bounding, BoundingType, ReluBounding},
     common::PairTensor,
     decoder::{GraphTransformerBackwardMapper, GraphTransformerBackwardMapperConfig},
     encoder::{GraphTransformerForwardMapper, GraphTransformerForwardMapperConfig},
@@ -52,6 +53,9 @@ pub struct AifsV2<B: Backend> {
 
     // Metadata
     metadata: Metadata,
+
+    // Boundings
+    boundings: Vec<BoundingType<B>>,
 }
 
 impl AifsV2Config {
@@ -124,6 +128,20 @@ impl AifsV2Config {
             )
         };
 
+        let boundings = self
+            .metadata
+            .boundings
+            .iter()
+            .map(|conf| {
+                BoundingType::from_bounding_config(
+                    &self.metadata,
+                    conf,
+                    &crate::metadata::ChannelKind::Output,
+                    device,
+                )
+            })
+            .collect();
+
         AifsV2 {
             named_attribute,
             encoder,
@@ -133,6 +151,7 @@ impl AifsV2Config {
             output_prognostic: indices(output_prognostic),
             // TODO(saiputravu): Stop cloning this everywhere.
             metadata: self.metadata.clone(),
+            boundings,
         }
     }
 }
@@ -186,12 +205,18 @@ impl<B: Backend> AifsV2<B> {
     pub fn assemble_output(&self, x_out: Tensor<B, 2>, x_skip: Tensor<B, 2>) -> Tensor<B, 2> {
         // The prognostic residual, scattered across two different index spaces. grid_skip is 0,
         // so every grid point takes the residual.
-        x_out.select_assign(
+        let mut a = x_out.select_assign(
             1,
             self.output_prognostic.clone(),
             x_skip.select(1, self.input_prognostic.clone()),
             IndexingUpdateOp::Add,
-        )
+        );
+
+        // Apply boundings.
+        for b in self.boundings.iter() {
+            a = b.forward(a);
+        }
+        a
     }
 
     /// One model step.
