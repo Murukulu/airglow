@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug)]
 pub enum Error {
@@ -38,9 +39,13 @@ impl error::Error for Error {
 
 // Role partitions for one tensor. `full` is not always the union of the other three:
 // `Metadata::data_input` lists diagnostics that the input tensor does not carry.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct IndexSet {
     pub full: Vec<usize>,
+    // Channel indices for the prognostic residual. input_prognostic indexes the
+    // num_input_channels space and output_prognostic the num_output_channels space; these are
+    // different index spaces (input starts [0, 1, 2, ..], output starts [2, 3, 4, ..]) naming the
+    // same variables, so they must have the same length.
     pub prognostic: Vec<usize>,
     pub diagnostic: Vec<usize>,
     pub forcing: Vec<usize>,
@@ -48,7 +53,7 @@ pub struct IndexSet {
 
 // Output clamps, applied in order after the residual. Fraction divides by a variable the
 // earlier entries have already clamped, so reordering these is silently wrong.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "_target_")]
 pub enum Bounding {
     #[serde(rename = "anemoi.models.layers.bounding.ReluBounding")]
@@ -69,7 +74,7 @@ pub enum Bounding {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Metadata {
     pub variables: Vec<String>, // The total possible variable space. The actual variables on inference and once infered vary.
     pub multistep: usize,       // Timesteps stacked into one input tensor.
@@ -102,12 +107,42 @@ pub struct Metadata {
     pub imputer_zero: Vec<String>,     // Filled with 0 wherever the source data is NaN.
     pub boundings: Vec<Bounding>,      // Output clamps, in application order.
 
+    pub nan_postprocessor_reference: String, // Reference variable for NaN masking
+    pub nan_postprocessor_vars: Vec<String>, // Variables to be masked
+
     // Not for graph construction: the edges were built from the f32 sin/cos coordinates.
     pub latitudes: Vec<f64>,  // Degrees, one per grid point.
     pub longitudes: Vec<f64>, // Degrees, 0..360.
 }
 
+pub enum ChannelKind {
+    Input,
+    Output,
+}
+
 impl Metadata {
+    // Get the index of a variable name in the list of variables in metadata.
+    // You can use this to index into the input tensor.
+    pub fn input_channel(&self, name: &str) -> Option<usize> {
+        self.var_to_input_channel.get(name).copied()
+    }
+
+    pub fn output_channel(&self, name: &str) -> Option<usize> {
+        self.var_to_output_channel.get(name).copied()
+    }
+
+    // Filters names that do not work.
+    pub fn channels_of_vec(&self, channel_names: &Vec<String>, kind: ChannelKind) -> Vec<i64> {
+        channel_names
+            .iter()
+            .filter_map(|var_name| match kind {
+                ChannelKind::Input => self.input_channel(var_name),
+                ChannelKind::Output => self.output_channel(var_name),
+            })
+            .map(|x| x as i64)
+            .collect()
+    }
+
     pub fn load(anemoi_metadata_dir: &Path) -> Result<Metadata, Error> {
         let path = anemoi_metadata_dir.join("ai-models.json");
         let file = fs::File::open(&path).map_err(|e| Error::Io(path.clone(), e))?;
@@ -148,6 +183,15 @@ impl Metadata {
             )));
         }
 
+        let conditional_nan_postprocessor_config = raw
+            .config
+            .data
+            .processors
+            .conditional_nan_postprocessor
+            .config;
+        let nan_postprocessor_reference = conditional_nan_postprocessor_config.remap;
+        let nan_postprocessor_vars = conditional_nan_postprocessor_config.nan;
+
         Ok(Metadata {
             var_to_input_channel: channel_map(
                 &variables,
@@ -169,6 +213,8 @@ impl Metadata {
             boundings: raw.config.model.bounding,
             latitudes,
             longitudes,
+            nan_postprocessor_reference,
+            nan_postprocessor_vars,
         })
     }
 }
@@ -223,6 +269,12 @@ struct RawData {
 #[derive(Deserialize)]
 struct RawProcessors {
     const_imputer: RawImputer,
+    conditional_nan_postprocessor: RawConditionalNanPostProcessor,
+}
+
+#[derive(Deserialize)]
+struct RawConditionalNanPostProcessor {
+    config: RawConditionalNanPostProcessorConfig,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +292,15 @@ struct RawImputerConfig {
     // A fallback policy rather than a variable list. Named only to keep it off the reject list.
     #[allow(dead_code)]
     default: String,
+}
+//
+// Keys are fill values. Only 0 is implemented, so reject the rest rather than drop them and
+// leave those variables unimputed.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConditionalNanPostProcessorConfig {
+    nan: Vec<String>,
+    remap: String,
 }
 
 #[derive(Deserialize)]

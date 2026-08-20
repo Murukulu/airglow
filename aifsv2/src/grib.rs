@@ -273,7 +273,9 @@ impl Regrid {
         let bad = |reason: String| Error::Matrix(path.to_path_buf(), reason);
 
         let mut store = SafetensorsStore::from_file(path);
-        let read = |store: &mut SafetensorsStore, name: &str| snapshot(store, name).map_err(bad);
+        let read = |store: &mut SafetensorsStore, name: &str| {
+            snapshot(store, name).map_err(|e| bad(e.to_string()))
+        };
 
         // Read out the sparse safetensor.
         let shape = read(&mut store, "shape")?
@@ -454,8 +456,9 @@ pub fn variable_names(field: &Field) -> Vec<String> {
 // Assemble the model's input tensor from the forecast files.
 //
 // Returns `[batch, time, grid, vars]` = `[1, multistep, 542080, 106]` in **physical units**:
-// routed, regridded, masked and imputed, but not normalised. The affine transform's
-// coefficients live in the checkpoint rather than the metadata, so it belongs to a later stage.
+// routed, regridded and masked, but neither imputed nor normalised -- NaN survives, and marks a
+// point where the source had no value. Both of those stages need coefficients or bookkeeping that
+// live in the checkpoint rather than the metadata, so they belong to processors::Processors.
 //
 // One oper and one wave file per timestep, oldest first. Nothing on disk carries a second valid
 // time yet, so passing the same pair twice is allowed and warned about: the retrieved forcings
@@ -491,7 +494,6 @@ pub fn tensor_from<B: Backend>(
     }
 
     let mut input_tensor = InputTensor::new(multistep, num_grid, num_vars);
-    let channel = |name: &str| metadata.var_to_input_channel.get(name).copied();
 
     // lsm comes from its own file at native resolution and skips the regrid entirely. The
     // open-data copy in the operational file is 8-bit packed -- 129 distinct values against
@@ -511,7 +513,7 @@ pub fn tensor_from<B: Backend>(
 
                 for (index, name) in variable_names(&field).iter().enumerate() {
                     // Check if in metadata.
-                    let Some(channel) = channel(name) else {
+                    let Some(channel) = metadata.input_channel(name) else {
                         continue; // Surplus: the 28 diagnostics, the 14 gh fields, fscov.
                     };
 
@@ -551,16 +553,16 @@ pub fn tensor_from<B: Backend>(
 
     // lsm last, so the native field wins over the open-data copy the operational file also
     // carries under the same name.
-    if let Some(channel) = channel("lsm") {
+    if let Some(channel) = metadata.input_channel("lsm") {
         for time in 0..multistep {
             input_tensor.write(time, channel, &lsm);
         }
     }
 
-    // apply-mask (data/inference.yaml:10-17): the three soil-ish fields are zeroed over sea.
+    // apply-mask (inference.yaml:10-17): the three soil-ish fields are zeroed over sea.
     // `sd` is in neither file, so today this reaches two of the three.
     for name in ["sd", "swvl1", "swvl2"] {
-        let Some(channel) = channel(name) else {
+        let Some(channel) = metadata.input_channel(name) else {
             continue;
         };
         input_tensor.map(channel, |point, v| if lsm[point] == 0.0 { 0.0 } else { v });
@@ -584,16 +586,9 @@ pub fn tensor_from<B: Backend>(
         write_forcings::<B>(&mut input_tensor, metadata, time, &date, device)?;
     }
 
-    // ConstantImputer, fill value 0, over the 17 variables the checkpoint names. Everything it
-    // covers is physically undefined somewhere -- soil moisture over ocean, wave parameters over
-    // land -- so NaN is the honest input and zero is what the model was trained to see.
-    for name in &metadata.imputer_zero {
-        let Some(channel) = channel(name) else {
-            continue;
-        };
-        input_tensor.map(channel, |_, v| if v.is_nan() { 0.0 } else { v });
-    }
-
+    // The ConstantImputer used to run here. It belongs to processors::Processors::pre, which has
+    // to see the NaN to record where they were: the post-processing stage restores them, and a
+    // fill applied this early is indistinguishable from data by the time it gets there.
     check_channels(metadata, &input_tensor)?;
 
     let data = TensorData::new(input_tensor.buffer, [1, multistep, num_grid, num_vars]);

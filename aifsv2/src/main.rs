@@ -9,7 +9,9 @@ use chrono::{TimeZone, Utc};
 
 use std::path::Path;
 
-use crate::{aifs::AifsV2Config, graph::GraphData, metadata::Metadata};
+use crate::{
+    aifs::AifsV2Config, graph::GraphData, metadata::Metadata, processors::Processors,
+};
 
 mod aifs;
 mod block;
@@ -21,6 +23,7 @@ mod graph;
 mod grib;
 mod metadata;
 mod named_node_attributes;
+mod processors;
 mod transformer;
 
 type MyBackend = Wgpu;
@@ -47,7 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph_store = SafetensorsStore::from_file(GRAPH_PATH);
     let graph_data = GraphData::<MyBackend>::from_safetensors_store(&mut graph_store, &device)?;
 
-    smoke_tests::<MyBackend>(&graph_data, &metadata, &device)
+    // Same file as the model weights, different key namespace: these are the pre/post-processor
+    // coefficient arrays, which are not module weights and so are read directly.
+    let mut processor_store = SafetensorsStore::from_file(CHECKPOINT_PATH);
+    let processors = Processors::<MyBackend>::load(&mut processor_store, &metadata, &device)?;
+
+    smoke_tests::<MyBackend>(&graph_data, &processors, &metadata, &device)
 }
 
 // `MemoryReport` rather than `Backend`: forward_smoke_test reports the allocator, so the backend
@@ -55,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 // backend at all.
 fn smoke_tests<B: MemoryReport>(
     graph_data: &GraphData<B>,
+    processors: &Processors<B>,
     metadata: &Metadata,
     device: &B::Device,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -66,7 +75,7 @@ fn smoke_tests<B: MemoryReport>(
         metadata.latitudes.len(),
     );
 
-    input_tensor_smoke_test::<B>(metadata, device)?;
+    input_tensor_smoke_test::<B>(processors, metadata, device)?;
 
     let [_, num_encoder_edges] = graph_data.data_to_hidden_edge_index.shape().dims();
     let [_, num_decoder_edges] = graph_data.hidden_to_data_edge_index.shape().dims();
@@ -88,7 +97,7 @@ fn smoke_tests<B: MemoryReport>(
     );
 
     load_checkpoint(metadata, graph_data, device)?;
-    forward_smoke_test::<B>(metadata, device);
+    forward_smoke_test::<B>(processors, metadata, device);
     forcings_smoke_test::<B>(metadata, device)?;
 
     Ok(())
@@ -104,6 +113,7 @@ fn smoke_tests<B: MemoryReport>(
 // both timesteps. tensor_from warns about that; the 5 retrieved forcings are constant in time and
 // the 9 computed ones are evaluated per row, so only the 92 prognostics are stale.
 fn input_tensor_smoke_test<B: Backend>(
+    processors: &Processors<B>,
     metadata: &Metadata,
     device: &B::Device,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -114,10 +124,16 @@ fn input_tensor_smoke_test<B: Backend>(
     let x = grib::tensor_from::<B>(&oper, &wave, LSM_PATH, metadata, &regrid, device)?;
     println!("\ninput tensor {:?}", x.shape().dims::<4>());
 
-    // NaN is how an unwritten point looks, and the imputer is the last thing that can remove one.
-    // x != x is only true at NaN.
-    let nans = x.clone().not_equal(x.clone()).int().sum().into_scalar();
-    assert_eq!(nans.elem::<i32>(), 0, "{nans} NaN survived the imputer");
+    // The imputer is the last thing that can remove a NaN, and it runs in pre. Everything the
+    // model sees has to be finite; nothing before this point is required to be.
+    //
+    // is_nan, not the x != x trick: on wgpu the comparison reports 0 against a tensor that min and
+    // max both agree is all-NaN, so it cannot be used to assert anything.
+    let nan_count = |x: Tensor<B, 4>| x.is_nan().int().sum().into_scalar().elem::<i32>();
+    let before = nan_count(x.clone());
+    let after = nan_count(processors.pre(x.clone()).x);
+    println!("  {before} NaN in physical units, {after} after pre-processing");
+    assert_eq!(after, 0, "{after} NaN survived the imputer");
 
     let last = metadata.multistep - 1;
     let channel = |name: &str| metadata.var_to_input_channel[name];
@@ -409,7 +425,11 @@ fn spot_check<B: Backend>(model: &aifs::AifsV2<B>) {
 // processor layers. The channel counts stay real (106 in, 120 out, multistep 2) so the input
 // layout under test is the one the real model sees. Weights are the lazily-initialised random
 // ones, not the checkpoint -- this exercises the chain, not the forecast.
-fn forward_smoke_test<B: MemoryReport>(metadata: &Metadata, device: &B::Device) {
+fn forward_smoke_test<B: MemoryReport>(
+    processors: &Processors<B>,
+    metadata: &Metadata,
+    device: &B::Device,
+) {
     const NUM_DATA_NODES: usize = 64;
     const NUM_HIDDEN_NODES: usize = 16;
     const SMALL_NUM_CHANNELS: usize = 256;
@@ -423,29 +443,50 @@ fn forward_smoke_test<B: MemoryReport>(metadata: &Metadata, device: &B::Device) 
         .with_num_processor_chunks(1)
         .init::<B>(&graph_data, device);
 
-    // Stands in for the assembled GRIB input: [batch, time, grid, vars].
-    let x = Tensor::<B, 4>::zeros(
-        [
-            1,
-            metadata.multistep,
-            NUM_DATA_NODES,
-            metadata.model_input.full.len(),
-        ],
-        device,
-    );
+    // Stands in for the assembled GRIB input: [batch, time, grid, vars]. NaN in one imputed
+    // channel, so the round trip through pre and post has something to carry: the imputer fills
+    // it on the way in and has to put it back on the way out.
+    let vars = metadata.model_input.full.len();
+    let x = Tensor::<B, 4>::zeros([1, metadata.multistep, NUM_DATA_NODES, vars], device);
+    let nan_channel = metadata.imputer_zero.iter().find_map(|name| {
+        let input = metadata.input_channel(name)?;
+        metadata.output_channel(name).map(|output| (name, input, output))
+    });
+    let x = match nan_channel {
+        Some((_, input, _)) => x.slice_fill([0..1, 0..1, 0..1, input..input + 1], f32::NAN),
+        None => x,
+    };
 
     // Note: do not clone the model before this call. Burn's Param is lazily initialised, so a
     // clone re-draws every Linear.
     let before = B::memory_usage(device);
-    let out = model.forward(x);
+    let out = model.predict_step(processors, x);
     let after = B::memory_usage(device);
 
     let dims = out.shape().dims::<2>();
     assert_eq!(dims, [NUM_DATA_NODES, metadata.model_output.full.len()]);
     println!(
-        "\nsynthetic forward ({NUM_DATA_NODES} data / {NUM_HIDDEN_NODES} hidden nodes, {SMALL_NUM_CHANNELS} channels)"
+        "\nsynthetic predict_step ({NUM_DATA_NODES} data / {NUM_HIDDEN_NODES} hidden nodes, {SMALL_NUM_CHANNELS} channels)"
     );
-    println!("  out {:?}, mean {}", dims, out.mean().into_scalar());
+
+    // The imputed point has to come back NaN, and only that point: the whole reason post takes
+    // PreProcessed is to carry that one bit of state across the model.
+    if let Some((name, _, output)) = nan_channel {
+        let column = out
+            .clone()
+            .slice([0..NUM_DATA_NODES, output..output + 1])
+            .into_data()
+            .to_vec::<f32>()
+            .expect("output column is not f32");
+        assert!(column[0].is_nan(), "{name} was imputed but came back finite");
+        assert!(
+            column[1..].iter().all(|v| v.is_finite()),
+            "{name} went NaN at a point that was never imputed",
+        );
+        println!("  {name} -> output channel {output}: NaN restored at 1 of {NUM_DATA_NODES} points");
+    }
+
+    println!("  out {:?}", dims);
     println!(
         "  device memory: {} reserved before, {} after (peak allocs {})",
         mib(before.bytes_reserved),
