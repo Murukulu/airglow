@@ -513,7 +513,7 @@ pub fn tensor_from<B: Backend>(
 
                 for (index, name) in variable_names(&field).iter().enumerate() {
                     // Check if in metadata.
-                    let Some(channel) = metadata.input_channel(name) else {
+                    let Ok(channel) = metadata.input_channel(name) else {
                         continue; // Surplus: the 28 diagnostics, the 14 gh fields, fscov.
                     };
 
@@ -553,7 +553,7 @@ pub fn tensor_from<B: Backend>(
 
     // lsm last, so the native field wins over the open-data copy the operational file also
     // carries under the same name.
-    if let Some(channel) = metadata.input_channel("lsm") {
+    if let Ok(channel) = metadata.input_channel("lsm") {
         for time in 0..multistep {
             input_tensor.write(time, channel, &lsm);
         }
@@ -562,7 +562,7 @@ pub fn tensor_from<B: Backend>(
     // apply-mask (inference.yaml:10-17): the three soil-ish fields are zeroed over sea.
     // `sd` is in neither file, so today this reaches two of the three.
     for name in ["sd", "swvl1", "swvl2"] {
-        let Some(channel) = metadata.input_channel(name) else {
+        let Ok(channel) = metadata.input_channel(name) else {
             continue;
         };
         input_tensor.map(channel, |point, v| if lsm[point] == 0.0 { 0.0 } else { v });

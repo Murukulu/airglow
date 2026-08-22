@@ -44,7 +44,10 @@ fn metadata() -> Metadata {
         data_input: set(Vec::new(), Vec::new()),
         data_output: set(Vec::new(), Vec::new()),
         model_input: set((0..NUM_INPUT_CHANNELS).collect(), INPUT_PROGNOSTIC.to_vec()),
-        model_output: set((0..NUM_OUTPUT_CHANNELS).collect(), OUTPUT_PROGNOSTIC.to_vec()),
+        model_output: set(
+            (0..NUM_OUTPUT_CHANNELS).collect(),
+            OUTPUT_PROGNOSTIC.to_vec(),
+        ),
         var_to_input_channel: HashMap::new(),
         var_to_output_channel: HashMap::new(),
         output_channel_to_var: Vec::new(),
@@ -78,7 +81,7 @@ fn input(batch: usize, device: &Device<TestBackend>) -> Tensor<TestBackend, 4> {
 fn forward_maps_input_grid_to_output_channels() {
     let device = Default::default();
     let graph = GraphData::<TestBackend>::synthetic(N_DATA, N_HIDDEN, &device);
-    let model = small_config().init::<TestBackend>(&graph, &device);
+    let model = small_config().init::<TestBackend>(&graph, &device).unwrap();
 
     let out = model.forward(input(1, &device));
 
@@ -96,7 +99,7 @@ fn forward_maps_input_grid_to_output_channels() {
 fn assemble_input_folds_time_into_the_outer_channel_index() {
     let device: Device<TestBackend> = Default::default();
     let graph = GraphData::<TestBackend>::synthetic(N_DATA, N_HIDDEN, &device);
-    let model = small_config().init::<TestBackend>(&graph, &device);
+    let model = small_config().init::<TestBackend>(&graph, &device).unwrap();
 
     let ((data_latent, hidden_latent), skip) = model.assemble_input(input(1, &device));
 
@@ -133,7 +136,7 @@ fn assemble_input_folds_time_into_the_outer_channel_index() {
 fn forward_batches_along_the_grid_axis() {
     let device = Default::default();
     let graph = GraphData::<TestBackend>::synthetic(N_DATA, N_HIDDEN, &device);
-    let model = small_config().init::<TestBackend>(&graph, &device);
+    let model = small_config().init::<TestBackend>(&graph, &device).unwrap();
 
     let out = model.forward(input(2, &device));
 
@@ -149,6 +152,7 @@ fn prognostic_residual_scatters_the_last_timestep() {
     let graph = GraphData::<TestBackend>::synthetic(N_DATA, N_HIDDEN, &device);
     let model = small_config()
         .init::<TestBackend>(&graph, &device)
+        .unwrap()
         .map(&mut ZeroParams);
 
     let x = input(1, &device);

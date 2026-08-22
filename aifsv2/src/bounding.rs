@@ -1,36 +1,53 @@
-use crate::metadata::{BoundingConfig, ChannelKind, Metadata};
+//! The output boundings -- anemoi's `config.model.bounding`, applied in list order at the end of
+//! `assemble_output`.
+//!
+//! These compute the bounded value over every channel and use a `[vars]` mask to choose which
+//! columns keep it.
+//!
+//! All of this runs in *normalised* space, because anemoi applies the boundings inside `forward`
+//! and only then hands off to `post_processors`.
+
+use crate::metadata::{self, BoundingConfig, ChannelKind, Metadata};
 use burn::{
     prelude::*,
-    tensor::{IndexingUpdateOp::Assign, activation::relu},
+    tensor::{Bool, activation::relu},
 };
+
+// Broadcast a [vars] channel mask over the rows of a [rows, vars] tensor.
+fn over_rows<B: Backend>(mask: Tensor<B, 1, Bool>, rows: usize) -> Tensor<B, 2, Bool> {
+    let vars = mask.shape().dims::<1>()[0];
+
+    // Expand mask via duplication.
+    mask.reshape([1, vars]).expand([rows, vars])
+}
 
 #[derive(Module, Debug)]
 pub struct ReluBounding<B: Backend> {
-    vars_idx: Tensor<B, 1, Int>, // [N_dst, vars]
+    mask: Tensor<B, 1, Bool>, // [vars]; true on the channels this bounds.
 }
 
 impl<B: Backend> ReluBounding<B> {
     pub fn new_init(
         metadata: &Metadata,
-        vars: &Vec<String>,
+        vars: &[String],
         kind: &ChannelKind,
         device: &B::Device,
-    ) -> ReluBounding<B> {
-        ReluBounding {
-            vars_idx: metadata.tensor_channels_of_vec(vars, kind, device),
-        }
+    ) -> Result<ReluBounding<B>, metadata::Error> {
+        Ok(ReluBounding {
+            mask: metadata.mask_channels_of_vec(vars, kind, device)?,
+        })
     }
 
     fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
-        let [_, vars_dim] = x.shape().dims::<2>();
-        let r = relu(x.clone().select(vars_dim, self.vars_idx.clone()));
-        x.scatter_nd(self.vars_idx.clone(), r, Assign)
+        let rows = x.shape().dims::<2>()[0];
+        let mask = over_rows(self.mask.clone(), rows);
+        x.clone().mask_where(mask, relu(x))
     }
 }
 
 #[derive(Module, Debug)]
 pub struct HardtanhBounding<B: Backend> {
-    vars_idx: Tensor<B, 1, Int>, // [N_dst, vars]
+    mask: Tensor<B, 1, Bool>, // [vars]; true on the channels this bounds.
     min: f64,
     max: f64,
 }
@@ -38,41 +55,43 @@ pub struct HardtanhBounding<B: Backend> {
 impl<B: Backend> HardtanhBounding<B> {
     pub fn new_init(
         metadata: &Metadata,
-        min: &f64,
-        max: &f64,
-        vars: &Vec<String>,
+        min: f64,
+        max: f64,
+        vars: &[String],
         kind: &ChannelKind,
         device: &B::Device,
-    ) -> HardtanhBounding<B> {
-        let vars_idx = metadata.tensor_channels_of_vec(vars, kind, device);
-        HardtanhBounding {
-            vars_idx,
-            min: min.clone(),
-            max: max.clone(),
-        }
+    ) -> Result<HardtanhBounding<B>, metadata::Error> {
+        Ok(HardtanhBounding {
+            mask: metadata.mask_channels_of_vec(vars, kind, device)?,
+            min,
+            max,
+        })
     }
 
     fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
-        let [_, vars_dim] = x.shape().dims::<2>();
+        let rows = x.shape().dims::<2>()[0];
+        let mask = over_rows(self.mask.clone(), rows);
         // Hardtanh is the piecewise function
         // (----------------------------)
         // |   max_val if x > max_val   |
         // |   min_val if x < min_val   |
         // |   x       else             |
         // (----------------------------)
-        let h = x
-            .clone()
-            .select(vars_dim, self.vars_idx.clone())
-            .clamp_max(self.max)
-            .clamp_min(self.min);
-        x.scatter_nd(self.vars_idx.clone(), h, Assign)
+        let h = x.clone().clamp_min(self.min).clamp_max(self.max);
+        x.mask_where(mask, h)
     }
 }
 
 #[derive(Module, Debug)]
 pub struct FractionBounding<B: Backend> {
-    total_var_idx: Tensor<B, 1, Int>, // [N_dst, 1]
-    vars_idx: Tensor<B, 1, Int>,      // [N_dst, vars]
+    // The channel the fraction is taken of, as a plain index. A one-element `Tensor<B, 1, Int>`
+    // fed to `select` is the obvious spelling and it is wrong here: held as a field and used
+    // across several forwards, it makes `select` return channel 0 instead of the one it names, on
+    // wgpu, silently. A freshly built index tensor on the same input returns the right column, so
+    // it is the stored one that goes bad. `slice_dim` needs no index tensor at all and was
+    // verified against a host-side read of the same column.
+    total_var: usize,
+    mask: Tensor<B, 1, Bool>, // [vars]; true on the channels this bounds.
     min: f64,
     max: f64,
 }
@@ -80,42 +99,39 @@ pub struct FractionBounding<B: Backend> {
 impl<B: Backend> FractionBounding<B> {
     pub fn new_init(
         metadata: &Metadata,
-        min: &f64,
-        max: &f64,
-        total_var: &String,
-        vars: &Vec<String>,
+        min: f64,
+        max: f64,
+        total_var: &str,
+        vars: &[String],
         kind: &ChannelKind,
         device: &B::Device,
-    ) -> FractionBounding<B> {
-        let total_var_idx = metadata.tensor_channels_of_vec(&vec![total_var.clone()], kind, device);
-        let vars_idx = metadata.tensor_channels_of_vec(vars, kind, device);
-        FractionBounding {
-            total_var_idx,
-            vars_idx,
-            min: min.clone(),
-            max: max.clone(),
+    ) -> Result<FractionBounding<B>, metadata::Error> {
+        let total_var = match kind {
+            ChannelKind::Input => metadata.input_channel(total_var),
+            ChannelKind::Output => metadata.output_channel(total_var),
         }
+        .unwrap_or_else(|var| {
+            panic!("FractionBounding total_var ({total_var:?}, {var:?}) has no channel")
+        });
+
+        Ok(FractionBounding {
+            total_var,
+            mask: metadata.mask_channels_of_vec(vars, kind, device)?,
+            min,
+            max,
+        })
     }
 
     fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
-        let [_, vars_dim] = x.shape().dims::<2>();
+        let rows = x.shape().dims::<2>()[0];
+        let mask = over_rows(self.mask.clone(), rows);
 
-        // 1. Apply hardtanh.
-        let h = x
-            .clone()
-            .select(vars_dim, self.vars_idx.clone())
-            .clamp_max(self.max)
-            .clamp_min(self.min);
+        // Get the total_var
+        let total = x.clone().slice_dim(1, self.total_var..self.total_var + 1);
+        // Scale total variable by the normalised values.
+        let f = x.clone().clamp_min(self.min).clamp_max(self.max) * total;
 
-        // 2. Multiply by total_variable; Anemoi calls "calculate fraction of the total var"
-        // Here, total_var will be of shape [N, 1] and the value ranges for x will be normalised
-        // as we expect this to be used in assemble_outputs.
-        //
-        // I guess this scales the total_var by the the hardtanh'd variable, which might be where
-        // the fraction in the name comes from...
-        let f = h * x.clone().select(vars_dim, self.total_var_idx.clone());
-
-        x.scatter_nd(self.vars_idx.clone(), f, Assign)
+        x.mask_where(mask, f)
     }
 }
 
@@ -132,26 +148,35 @@ impl<B: Backend> BoundingType<B> {
         conf: &BoundingConfig,
         kind: &ChannelKind,
         device: &B::Device,
-    ) -> BoundingType<B> {
+    ) -> Result<BoundingType<B>, metadata::Error> {
         match conf {
-            BoundingConfig::Relu { variables } => {
-                BoundingType::Relu(ReluBounding::new_init(metadata, variables, kind, device))
-            }
+            BoundingConfig::Relu { variables } => Ok(BoundingType::Relu(ReluBounding::new_init(
+                metadata, variables, kind, device,
+            )?)),
             BoundingConfig::Hardtanh {
                 variables,
                 min_val,
                 max_val,
-            } => BoundingType::Hardtanh(HardtanhBounding::new_init(
-                metadata, min_val, max_val, variables, kind, device,
-            )),
+            } => Ok(BoundingType::Hardtanh(HardtanhBounding::new_init(
+                metadata, *min_val, *max_val, variables, kind, device,
+            )?)),
             BoundingConfig::Fraction {
                 variables,
                 min_val,
                 max_val,
                 total_var,
-            } => BoundingType::Fraction(FractionBounding::new_init(
-                metadata, min_val, max_val, total_var, variables, kind, device,
-            )),
+            } => {
+                // The forward reads the total column from the tensor it is about to write. If the
+                // total were one of the bounded variables the two would race and the port would
+                // silently disagree with anemoi, which writes first and reads after.
+                assert!(
+                    !variables.contains(total_var),
+                    "FractionBounding total_var {total_var:?} is also one of its own variables",
+                );
+                Ok(BoundingType::Fraction(FractionBounding::new_init(
+                    metadata, *min_val, *max_val, total_var, variables, kind, device,
+                )?))
+            }
         }
     }
 
@@ -174,6 +199,8 @@ impl<B: Backend> Bounding<B> {
         Bounding { boundings }
     }
 
+    /// Applies each bounding in turn. The order is the order of `config.model.bounding` and is
+    /// load-bearing: `FractionBounding` reads a variable the earlier entries have already clamped.
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let mut a = x;
         for b in self.boundings.iter() {
@@ -182,3 +209,7 @@ impl<B: Backend> Bounding<B> {
         a
     }
 }
+
+#[cfg(test)]
+#[path = "bounding_test.rs"]
+mod tests;

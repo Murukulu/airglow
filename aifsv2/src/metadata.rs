@@ -9,7 +9,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::Serialize;
 
-use burn::prelude::*;
+use burn::{prelude::*, tensor::Bool};
+
+use crate::metadata::Error::BadMask;
 
 #[derive(Debug)]
 pub enum Error {
@@ -17,6 +19,7 @@ pub enum Error {
     Json(PathBuf, serde_json::Error),
     // The checkpoint parsed but does not describe a usable model.
     Malformed(String),
+    BadMask(String),
 }
 
 impl fmt::Display for Error {
@@ -25,6 +28,7 @@ impl fmt::Display for Error {
             Error::Io(path, e) => write!(f, "reading {}: {e}", path.display()),
             Error::Json(path, e) => write!(f, "parsing {}: {e}", path.display()),
             Error::Malformed(message) => f.write_str(message),
+            BadMask(message) => f.write_str(message),
         }
     }
 }
@@ -35,6 +39,7 @@ impl error::Error for Error {
             Error::Io(_, e) => Some(e),
             Error::Json(_, e) => Some(e),
             Error::Malformed(_) => None,
+            BadMask(_) => None,
         }
     }
 }
@@ -117,6 +122,7 @@ pub struct Metadata {
     pub longitudes: Vec<f64>, // Degrees, 0..360.
 }
 
+#[derive(Debug)]
 pub enum ChannelKind {
     Input,
     Output,
@@ -125,35 +131,71 @@ pub enum ChannelKind {
 impl Metadata {
     // Get the index of a variable name in the list of variables in metadata.
     // You can use this to index into the input tensor.
-    pub fn input_channel(&self, name: &str) -> Option<usize> {
-        self.var_to_input_channel.get(name).copied()
+    pub fn input_channel(&self, name: &str) -> Result<usize, String> {
+        self.var_to_input_channel
+            .get(name)
+            .copied()
+            .ok_or(name.to_string())
     }
 
-    pub fn output_channel(&self, name: &str) -> Option<usize> {
-        self.var_to_output_channel.get(name).copied()
+    pub fn output_channel(&self, name: &str) -> Result<usize, String> {
+        self.var_to_output_channel
+            .get(name)
+            .copied()
+            .ok_or(name.to_string())
     }
 
-    // Filters names that do not work.
-    pub fn channels_of_vec(&self, channel_names: &Vec<String>, kind: &ChannelKind) -> Vec<i64> {
+    // Generates list of indices per variable/channel, given the name. This accounts for either
+    // output channel shape or input channel shape as the variables here are different. I.e.
+    // the input channel only has forcings and prognostic variables.
+    //
+    // This returns a lazily evaluated iterator.
+    pub fn channels_of_vec<'a>(
+        &self,
+        channel_names: &'a [String],
+        kind: &ChannelKind,
+    ) -> std::iter::Map<std::slice::Iter<'a, String>, impl FnMut(&'a String) -> Result<usize, String>>
+    {
         channel_names
             .iter()
-            .filter_map(|var_name| match kind {
+            // The lifetime parameters force var_name to live as long as channel_name.
+            // This enables us to be able to iterate lazily over it.
+            .map(|var_name| match kind {
                 ChannelKind::Input => self.input_channel(var_name),
                 ChannelKind::Output => self.output_channel(var_name),
             })
-            .map(|x| x as i64)
-            .collect()
     }
 
-    pub fn tensor_channels_of_vec<B: Backend>(
+    // The channels of `channel_names` as a `[width]` mask rather than a gather index, for the ops
+    // that pick columns by masking instead of by indexing. `width` is the channel count of `kind`.
+    //
+    // Returns BadMask error if you provide invalid channel names.
+    pub fn mask_channels_of_vec<B: Backend>(
         &self,
-        channel_names: &Vec<String>,
+        channel_names: &[String],
         kind: &ChannelKind,
         device: &B::Device,
-    ) -> Tensor<B, 1, Int> {
-        let vars_idx = self.channels_of_vec(channel_names, kind);
-        let n = &vars_idx.len();
-        Tensor::<B, 1, Int>::from_data(TensorData::new(vars_idx, [n]), device)
+    ) -> Result<Tensor<B, 1, Bool>, Error> {
+        let width = match kind {
+            ChannelKind::Input => self.model_input.full.len(),
+            ChannelKind::Output => self.model_output.full.len(),
+        };
+        let mut mask = vec![false; width];
+        for channel in self.channels_of_vec(channel_names, kind) {
+            match channel {
+                Ok(c) => mask[c] = true,
+                Err(name) => {
+                    return Err(BadMask(format!(
+                        "mask added variables not in {:?} channel: {:?}",
+                        kind, name
+                    )));
+                }
+            }
+        }
+        Ok(Tensor::<B, 1, Bool>::from_data(
+            TensorData::new(mask, [width]),
+            device,
+        ))
     }
 
     pub fn load(anemoi_metadata_dir: &Path) -> Result<Metadata, Error> {

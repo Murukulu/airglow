@@ -4,12 +4,12 @@ use burn::{prelude::*, tensor::IndexingUpdateOp};
 use burn_store::{PyTorchToBurnAdapter, SafetensorsStore};
 
 use crate::{
-    bounding::{Bounding, BoundingType, ReluBounding},
+    bounding::{Bounding, BoundingType},
     common::PairTensor,
     decoder::{GraphTransformerBackwardMapper, GraphTransformerBackwardMapperConfig},
     encoder::{GraphTransformerForwardMapper, GraphTransformerForwardMapperConfig},
     graph::GraphData,
-    metadata::Metadata,
+    metadata::{self, Metadata},
     named_node_attributes::{NamedNodeAttributes, NamedNodeAttributesConfig, TensorType},
     processors::Processors,
     transformer::{TransformerProcessor, TransformerProcessorConfig},
@@ -55,7 +55,7 @@ pub struct AifsV2<B: Backend> {
     metadata: Metadata,
 
     // Boundings
-    boundings: Vec<BoundingType<B>>,
+    boundings: Bounding<B>,
 }
 
 impl AifsV2Config {
@@ -66,7 +66,11 @@ impl AifsV2Config {
         Self::new(num_channels, metadata.clone())
     }
 
-    pub fn init<B: Backend>(&self, graph_data: &GraphData<B>, device: &B::Device) -> AifsV2<B> {
+    pub fn init<B: Backend>(
+        &self,
+        graph_data: &GraphData<B>,
+        device: &B::Device,
+    ) -> Result<AifsV2<B>, metadata::Error> {
         let num_input_channels = self.metadata.model_input.full.len();
         let num_output_channels = self.metadata.model_output.full.len();
         let input_prognostic = &self.metadata.model_input.prognostic;
@@ -128,21 +132,24 @@ impl AifsV2Config {
             )
         };
 
-        let boundings = self
+        // anemoi builds these against `data_indices.model.output.name_to_index`, so they index the
+        // output channel space, not the dataset or the input.
+        let b = self
             .metadata
             .boundings
             .iter()
             .map(|conf| {
-                BoundingType::from_bounding_config(
+                BoundingType::<B>::from_bounding_config(
                     &self.metadata,
                     conf,
                     &crate::metadata::ChannelKind::Output,
                     device,
                 )
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
+        let boundings = Bounding::new(b);
 
-        AifsV2 {
+        Ok(AifsV2 {
             named_attribute,
             encoder,
             proc,
@@ -152,7 +159,7 @@ impl AifsV2Config {
             // TODO(saiputravu): Stop cloning this everywhere.
             metadata: self.metadata.clone(),
             boundings,
-        }
+        })
     }
 }
 
@@ -199,24 +206,20 @@ impl<B: Backend> AifsV2<B> {
     /// Anemoi's `AnemoiModelInterface._assemble_output`. `x_out` is the decoder's
     /// `[batch * grid, num_output_channels]` and `x_skip` the last timestep from assemble_input.
     ///
-    /// TODO(saiputravu): Apply the boundings (ReluBounding on 26 vars, Hardtanh(0, 1) on 4, and
-    /// two FractionBoundings), which run here in list order after the residual. See
+    /// The boundings run here, after the residual and in `config.model.bounding` order. They are
+    /// applied in normalised space, before the post-processors; see bounding.rs and
     /// docs/grib-to-inference-pipeline.md §6.
     pub fn assemble_output(&self, x_out: Tensor<B, 2>, x_skip: Tensor<B, 2>) -> Tensor<B, 2> {
         // The prognostic residual, scattered across two different index spaces. grid_skip is 0,
         // so every grid point takes the residual.
-        let mut a = x_out.select_assign(
+        let x_out = x_out.select_assign(
             1,
             self.output_prognostic.clone(),
             x_skip.select(1, self.input_prognostic.clone()),
             IndexingUpdateOp::Add,
         );
 
-        // Apply boundings.
-        for b in self.boundings.iter() {
-            a = b.forward(a);
-        }
-        a
+        self.boundings.forward(x_out)
     }
 
     /// One model step.

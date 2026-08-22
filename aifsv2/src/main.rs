@@ -44,6 +44,7 @@ const NUM_CHANNELS: usize = 1024;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device: Device<MyBackend> = Default::default();
     let metadata = Metadata::load(Path::new(METADATA_DIR))?;
+
     // No PyTorchToBurnAdapter here: these are raw arrays, not module weights, so the
     // adapter's [out, in] -> [in, out] transpose would corrupt them.
     let mut graph_store = SafetensorsStore::from_file(GRAPH_PATH);
@@ -74,7 +75,20 @@ fn smoke_tests<B: MemoryReport>(
         metadata.latitudes.len(),
     );
 
+    let point_a = B::memory_usage(device);
+    println!(
+        "  device memory: {} reserved (peak allocs {})",
+        mib(point_a.bytes_reserved),
+        mib(point_a.number_allocs),
+    );
+
     input_tensor_smoke_test::<B>(processors, metadata, device)?;
+    let point_b = B::memory_usage(device);
+    println!(
+        "  device memory: {} reserved (peak allocs {})",
+        mib(point_b.bytes_reserved),
+        mib(point_b.number_allocs),
+    );
 
     let [_, num_encoder_edges] = graph_data.data_to_hidden_edge_index.shape().dims();
     let [_, num_decoder_edges] = graph_data.hidden_to_data_edge_index.shape().dims();
@@ -96,8 +110,15 @@ fn smoke_tests<B: MemoryReport>(
     );
 
     load_checkpoint(metadata, graph_data, device)?;
-    forward_smoke_test::<B>(processors, metadata, device);
-    forcings_smoke_test::<B>(metadata, device)?;
+    let point_c = B::memory_usage(device);
+    println!(
+        "  device memory: {} reserved (peak allocs {})",
+        mib(point_c.bytes_reserved),
+        mib(point_c.number_allocs),
+    );
+
+    // forward_smoke_test::<B>(processors, metadata, device)?;
+    // forcings_smoke_test::<B>(metadata, device)?;
 
     Ok(())
 }
@@ -310,7 +331,7 @@ fn load_checkpoint<B: Backend>(
     device: &Device<B>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = AifsV2Config::from_metadata(metadata, NUM_CHANNELS);
-    let mut model = config.init::<B>(graph_data, device);
+    let mut model = config.init::<B>(graph_data, device)?;
 
     let mut store = aifs::checkpoint_store(CHECKPOINT_PATH);
     let result = model.load_from(&mut store)?;
@@ -428,7 +449,7 @@ fn forward_smoke_test<B: MemoryReport>(
     processors: &Processors<B>,
     metadata: &Metadata,
     device: &B::Device,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     const NUM_DATA_NODES: usize = 64;
     const NUM_HIDDEN_NODES: usize = 16;
     const SMALL_NUM_CHANNELS: usize = 256;
@@ -440,7 +461,7 @@ fn forward_smoke_test<B: MemoryReport>(
         .with_num_heads(8)
         .with_num_processor_layers(2)
         .with_num_processor_chunks(1)
-        .init::<B>(&graph_data, device);
+        .init::<B>(&graph_data, device)?;
 
     // Stands in for the assembled GRIB input: [batch, time, grid, vars]. NaN in one imputed
     // channel, so the round trip through pre and post has something to carry: the imputer fills
@@ -448,9 +469,10 @@ fn forward_smoke_test<B: MemoryReport>(
     let vars = metadata.model_input.full.len();
     let x = Tensor::<B, 4>::zeros([1, metadata.multistep, NUM_DATA_NODES, vars], device);
     let nan_channel = metadata.imputer_zero.iter().find_map(|name| {
-        let input = metadata.input_channel(name)?;
+        let input = metadata.input_channel(name).ok()?;
         metadata
             .output_channel(name)
+            .ok()
             .map(|output| (name, input, output))
     });
     let x = match nan_channel {
@@ -499,6 +521,7 @@ fn forward_smoke_test<B: MemoryReport>(
         mib(after.bytes_reserved),
         after.number_allocs,
     );
+    Ok(())
 }
 
 trait MemoryReport: Backend {

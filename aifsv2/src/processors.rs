@@ -134,11 +134,11 @@ impl<B: Backend> Imputer<B> {
         let mut restores = vec![false; metadata.model_output.full.len()];
 
         for name in &metadata.imputer_zero {
-            let Some(input) = metadata.input_channel(name) else {
+            let Ok(input) = metadata.input_channel(name) else {
                 continue;
             };
             fill[input] = true;
-            if let Some(output) = metadata.output_channel(name) {
+            if let Ok(output) = metadata.output_channel(name) {
                 restore_from[output] = input as i64;
                 restores[output] = true;
             }
@@ -209,15 +209,17 @@ impl<B: Backend> ConditionalNan<B> {
         // the metadata.
         let reference = metadata
             .output_channel(&metadata.nan_postprocessor_reference)
-            .ok_or(Error::Metadata(format!(
-                "nan postprocessor remaps on {:?}, which has no output channel",
-                metadata.nan_postprocessor_reference
-            )))?;
+            .map_err(|e| {
+                Error::Metadata(format!(
+                    "nan postprocessor remaps on {:?}, which has no output channel",
+                    metadata.nan_postprocessor_reference
+                ))
+            })?;
 
         // Setup bool mask on which targets should have ConditionalNaN from reference.
         let mut targets = vec![false; vars_out];
         for name in &metadata.nan_postprocessor_vars {
-            if let Some(channel) = metadata.output_channel(name) {
+            if let Ok(channel) = metadata.output_channel(name) {
                 targets[channel] = true;
             }
         }
