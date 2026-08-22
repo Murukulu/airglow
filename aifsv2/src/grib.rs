@@ -118,10 +118,97 @@ pub struct Field {
     pub values: Vec<f32>,
 }
 
+// Host-side summary of a slice of values, NaN-aware.
+//
+// The point of computing this on the CPU is that it is the oracle: it never touches a backend
+// reduction, so it is what `Tensor::min`/`max` get compared against. Those two return the
+// reduction's identity (+/-f32::MAX) on wgpu when the tensor holds NaN, so a range printed
+// through them cannot be trusted on any channel that is legitimately masked -- which is every
+// wave field, every soil field, and `sd`. See docs/encoder-processor-decoder-review.md 4.1.
+//
+// `min`/`max`/`mean` are over the finite values only, and are NaN when there are none. That is
+// deliberate: an all-masked channel should be visibly empty rather than silently reporting a
+// sentinel that reads like data.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stats {
+    pub points: usize,
+    pub nan: usize,
+    pub min: f32,
+    pub max: f32,
+    pub mean: f64,
+}
+
+impl Stats {
+    pub fn finite(&self) -> usize {
+        self.points - self.nan
+    }
+}
+
+impl fmt::Display for Stats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pct = 100.0 * self.nan as f64 / self.points.max(1) as f64;
+        if self.finite() == 0 {
+            return write!(f, "{} points, all NaN", self.points);
+        }
+        write!(
+            f,
+            "[{}, {}] mean {:.6}, {} finite, {} NaN ({:.1}%)",
+            self.min,
+            self.max,
+            self.mean,
+            self.finite(),
+            self.nan,
+            pct
+        )
+    }
+}
+
+// Summarise values on the host. Iterates once; NaN never participates in the comparisons, so
+// unlike the backend reductions a single masked point does not poison the result.
+pub fn stats(values: &[f32]) -> Stats {
+    let (mut nan, mut min, mut max, mut sum) = (0usize, f32::INFINITY, f32::NEG_INFINITY, 0f64);
+    for &v in values {
+        if v.is_nan() {
+            nan += 1;
+            continue;
+        }
+        min = min.min(v);
+        max = max.max(v);
+        sum += v as f64;
+    }
+    let finite = values.len() - nan;
+    Stats {
+        points: values.len(),
+        nan,
+        min: if finite == 0 { f32::NAN } else { min },
+        max: if finite == 0 { f32::NAN } else { max },
+        mean: if finite == 0 {
+            f64::NAN
+        } else {
+            sum / finite as f64
+        },
+    }
+}
+
+// One channel of the assembled tensor, at one timestep.
+#[derive(Debug, Clone)]
+pub struct ChannelStats {
+    pub time: usize,
+    pub channel: usize,
+    pub stats: Stats,
+}
+
 impl Field {
     // Number of masked points -- ocean under a soil field, land under a wave field.
     pub fn missing(&self) -> usize {
         self.values.iter().filter(|v| v.is_nan()).count()
+    }
+
+    // The same accounting `scripts/parse_grib.py --missing` prints, computed from the values
+    // this crate actually decoded. Comparing the two is what checks `unmask` and the ecCodes
+    // read, independently of anything on the GPU.
+    pub fn stats(&self) -> Stats {
+        stats(&self.values)
     }
 
     // The message's own valid time. Anemoi calls this the field's date and keys the time axis
@@ -232,6 +319,7 @@ pub(crate) fn for_each_field(
             valid_time: msg.read_key("validityTime").map_err(codes)?,
             grid_type,
             grid,
+            // Apply the eccodes 9999.0 -> NaN map since eccodes represents as nan.
             values: unmask(values, missing as f64),
         })?;
     }
@@ -455,15 +543,10 @@ pub fn variable_names(field: &Field) -> Vec<String> {
 
 // Assemble the model's input tensor from the forecast files.
 //
-// Returns `[batch, time, grid, vars]` = `[1, multistep, 542080, 106]` in **physical units**:
-// routed, regridded and masked, but neither imputed nor normalised -- NaN survives, and marks a
-// point where the source had no value. Both of those stages need coefficients or bookkeeping that
-// live in the checkpoint rather than the metadata, so they belong to processors::Processors.
-//
-// One oper and one wave file per timestep, oldest first. Nothing on disk carries a second valid
-// time yet, so passing the same pair twice is allowed and warned about: the retrieved forcings
-// are constant in time and the computed ones are evaluated per row regardless, so only the 92
-// prognostics go stale.
+// Pass the oper/wave file combinations with older entries first.
+// Returns `[batch, time, grid, vars]` = `[1, multistep, N320, 106 input vars]`. These are in
+// physical units. These are routed, regridded and masked but are NOT imputed nor normalised. The
+// preprocessors must still see these. You should call the preprocessor forward on this.
 pub fn tensor_from<B: Backend>(
     oper_paths: &[&str],
     wave_paths: &[&str],
@@ -472,6 +555,19 @@ pub fn tensor_from<B: Backend>(
     regrid: &Regrid,
     device: &B::Device,
 ) -> Result<Tensor<B, 4>, Error> {
+    let (t, _) = tensor_and_stats(oper_paths, wave_paths, lsm_path, metadata, regrid, device)?;
+    Ok(t)
+}
+
+// Add the per-channel host-side stats taken off the buffer on its way the device.
+pub fn tensor_and_stats<B: Backend>(
+    oper_paths: &[&str],
+    wave_paths: &[&str],
+    lsm_path: &str,
+    metadata: &Metadata,
+    regrid: &Regrid,
+    device: &B::Device,
+) -> Result<(Tensor<B, 4>, Vec<ChannelStats>), Error> {
     let multistep = metadata.multistep;
     if oper_paths.len() != multistep || wave_paths.len() != multistep {
         return Err(Error::Multistep {
@@ -591,8 +687,11 @@ pub fn tensor_from<B: Backend>(
     // fill applied this early is indistinguishable from data by the time it gets there.
     check_channels(metadata, &input_tensor)?;
 
+    // Taken before the move into TensorData, which consumes the buffer.
+    let stats = input_tensor.channel_stats();
+
     let data = TensorData::new(input_tensor.buffer, [1, multistep, num_grid, num_vars]);
-    Ok(Tensor::from_data(data, device))
+    Ok((Tensor::from_data(data, device), stats))
 }
 
 // Laid out (time * grid * vars) flat, so that the finished buffer can be created directly into
@@ -626,6 +725,29 @@ impl InputTensor {
             self.buffer[base + i * self.num_vars + channel] = value;
         }
         self.written[time * self.num_vars + channel] = true;
+    }
+
+    // Stats for every (timestep, channel), read straight out of the flat buffer
+    // before it ever reaches a device.
+    fn channel_stats(&self) -> Vec<ChannelStats> {
+        let mut column = Vec::with_capacity(self.num_grid);
+        let mut out = Vec::with_capacity(self.multistep * self.num_vars);
+        for time in 0..self.multistep {
+            let base = time * self.num_grid * self.num_vars;
+            for channel in 0..self.num_vars {
+                column.clear();
+                column.extend(
+                    (0..self.num_grid)
+                        .map(|point| self.buffer[base + point * self.num_vars + channel]),
+                );
+                out.push(ChannelStats {
+                    time,
+                    channel,
+                    stats: stats(&column),
+                });
+            }
+        }
+        out
     }
 
     // Rewrite one channel in place, given each point's index -- what the mask and the imputer

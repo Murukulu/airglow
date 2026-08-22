@@ -13,6 +13,21 @@ one flat array in row-major order, so reproducing the grid means keeping `pl` in
 hence --max-array defaults to 1024, big enough to inline all 640 entries of `pl` while
 still collapsing the 542,080-element `values`/`latitudes`/`longitudes` arrays.
 
+MISSING VALUES
+--------------
+Several fields are undefined over part of the globe: every wave field is defined only over
+water, and soil/snow fields only over land. GRIB expresses that with a *bitmap* — a per-point
+validity mask in section 6 — and ecCodes expands it for you, filling the masked points with
+`missingValue` (9999 unless something sets it otherwise). src/grib.rs:248 rewrites those to
+NaN at the boundary, because the checkpoint's ConstantImputer only recognises NaN and 9999
+would otherwise reach the model as a real measurement.
+
+--missing reports that accounting per message. --regrid additionally pushes the field through
+the same 0.25 -> N320 operator the Rust runtime uses, which is how you check whether a NaN
+count on the model grid is source data or something the port introduced: NaN propagates
+through the interpolation stencil, so any target point whose stencil touches a masked source
+point comes out NaN too.
+
 Usage:
     python scripts/parse_grib.py                       # summary + grid
     python scripts/parse_grib.py --keys                # all key names
@@ -21,8 +36,12 @@ Usage:
     python scripts/parse_grib.py --json                # -> lsm_keys.json
     python scripts/parse_grib.py --json -              # JSON to stdout
     python scripts/parse_grib.py -f other.grib -m 3 -s  # 3rd message of another file
+    python scripts/parse_grib.py -f data/20260810000000-0h-wave-fc.grib2 -a --missing
+    python scripts/parse_grib.py -f data/20260810000000-0h-wave-fc.grib2 -a --regrid
+    ... --regrid --transform cos -q shortName          # cos(mwd), as the port builds it
 
-Requires pygrib (which brings eccodes).
+Requires pygrib (which brings eccodes). --regrid additionally needs scipy and safetensors;
+all three are in data/aifs-single-mse-2.0/quiet_grub/.venv.
 """
 
 import argparse
@@ -34,7 +53,9 @@ from pathlib import Path
 import numpy as np
 import pygrib
 
-DEFAULT_PATH = Path(__file__).resolve().parent.parent / "data" / "lsm.grib"
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PATH = ROOT / "data" / "lsm.grib"
+DEFAULT_MATRIX = ROOT / "data" / "regrid-0p25-to-n320.safetensors"
 
 # Keys that are huge, redundant with `values`, or that eccodes only exposes as raw
 # section bytes. Skipped when enumerating keys so a dump stays readable.
@@ -166,6 +187,109 @@ def value_stats(msg, expand: bool = False, max_unique: int = 20) -> dict:
     return stats
 
 
+def stored_values(msg, expand: bool = False) -> np.ndarray:
+    """The message's values as a flat float64 array, masked points as NaN.
+
+    pygrib expands reduced grids to a full 2-D lat/lon grid unless told not to — for lsm.grib
+    that would turn 542,080 stored values into 640x1280 interpolated ones — so that is turned
+    off and what comes back is what is in the file, in stored order.
+
+    Turning it off also drops pygrib's masked-array wrapper, leaving the raw `missingValue`
+    fill (9999) in the data. That is precisely the array src/grib.rs receives from ecCodes,
+    so the substitution below is the same one `unmask` does at src/grib.rs:248-252, and for
+    the same reason: 9999 is a plausible-looking wave height, and nothing downstream would
+    catch it.
+    """
+    msg.expand_grid(expand)
+    values = msg.values
+    if np.ma.isMaskedArray(values):
+        values = np.ma.filled(values.astype("float64"), np.nan)
+    values = np.asarray(values, dtype="float64").ravel()
+
+    missing = safe_get(msg, "missingValue")
+    if isinstance(missing, (int, float)):
+        values = np.where(values == missing, np.nan, values)
+    return values
+
+
+def missing_report(msg, expand: bool = False) -> dict:
+    """Bitmap accounting for one message: how much is masked, and what survives."""
+    values = stored_values(msg, expand)
+    nan = np.isnan(values)
+    finite = values[~nan]
+
+    info = {
+        "shortName": safe_get(msg, "shortName"),
+        "paramId": safe_get(msg, "paramId"),
+        "typeOfLevel": safe_get(msg, "typeOfLevel"),
+        "gridType": safe_get(msg, "gridType"),
+        "points": values.size,
+        "bitmapPresent": safe_get(msg, "bitmapPresent") if msg.has_key("bitmapPresent") else "<absent>",
+        "missingValue": safe_get(msg, "missingValue"),
+        "missing": f"{int(nan.sum())} ({100 * nan.mean():.1f}%)",
+        "finite": int(finite.size),
+    }
+    if finite.size:
+        info["range"] = f"[{finite.min():.4f}, {finite.max():.4f}]"
+        uniq = np.unique(finite)
+        info["distinct"] = int(uniq.size)
+    return info
+
+
+def load_matrix(path: Path):
+    """The 0.25 -> N320 CSR operator written by fetch_regrid_matrix.py."""
+    from safetensors.numpy import load_file
+    from scipy.sparse import csr_matrix
+
+    t = load_file(str(path))
+    num_target, num_source = (int(v) for v in t["shape"])
+    matrix = csr_matrix((t["weights"], t["indices"], t["indptr"]),
+                        shape=(num_target, num_source))
+    return matrix
+
+
+def regrid_report(msg, matrix, transform: str | None = None) -> dict:
+    """Push one message through the regrid and report what the model grid ends up holding.
+
+    Mirrors src/grib.rs exactly: the cos/sin transform (for mwd) runs on the source grid
+    before the regrid, and the row rotation runs inside it. The matrix's input gridspec has
+    column 0 at Greenwich while the open-data files start at the dateline, so each row is
+    rolled by longitudeOfFirstGridPointInDegrees / iDirectionIncrementInDegrees columns
+    first — 720 for a 0.25 degree file. Dropping that rotation leaves the global mean intact
+    and moves a third of the points, which is why it is checked here rather than assumed.
+    """
+    ni, nj = safe_get(msg, "Ni"), safe_get(msg, "Nj")
+    lon_first = safe_get(msg, "longitudeOfFirstGridPointInDegrees")
+    di = safe_get(msg, "iDirectionIncrementInDegrees")
+    values = stored_values(msg)
+
+    if values.size != matrix.shape[1] or ni * nj != matrix.shape[1]:
+        return {"error": f"matrix takes {matrix.shape[1]} source points, "
+                         f"field has {values.size} ({ni} x {nj})"}
+
+    if transform:
+        radians = np.radians(values)
+        values = np.cos(radians) if transform == "cos" else np.sin(radians)
+
+    shift = int(round(lon_first / di)) % ni
+    rolled = values.reshape(nj, ni)
+    if shift:
+        rolled = np.concatenate([rolled[:, ni - shift:], rolled[:, :ni - shift]], axis=1)
+    out = matrix @ rolled.ravel()
+
+    src_nan, out_nan = np.isnan(values), np.isnan(out)
+    finite = out[~out_nan]
+    info = {
+        "transform": transform or "none",
+        "row shift": f"{shift} columns ({lon_first} deg first, {di} deg step)",
+        "source": f"{values.size} points, {int(src_nan.sum())} NaN ({100 * src_nan.mean():.1f}%)",
+        "target": f"{out.size} points, {int(out_nan.sum())} NaN ({100 * out_nan.mean():.1f}%)",
+    }
+    info["finite"] = (f"{finite.size}, range [{finite.min():.4f}, {finite.max():.4f}]"
+                      if finite.size else "0 — the whole field is NaN on the model grid")
+    return info
+
+
 def print_block(title: str, info: dict) -> None:
     print(title)
     width = max((len(k) for k in info), default=0)
@@ -193,6 +317,15 @@ def main():
     parser.add_argument("--query", "-q", nargs="+", metavar="PATTERN",
                         help="Key names or glob patterns (e.g. 'latitudeOf*'); prints matching key values")
     parser.add_argument("--stats", "-s", action="store_true", help="Print value statistics")
+    parser.add_argument("--missing", "-M", action="store_true",
+                        help="Print bitmap / missing-value accounting (what src/grib.rs turns into NaN)")
+    parser.add_argument("--regrid", "-r", action="store_true",
+                        help="Push the field through the 0.25 -> N320 operator and report NaN either side")
+    parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX, metavar="PATH",
+                        help=f"CSR operator for --regrid (default: {DEFAULT_MATRIX.name})")
+    parser.add_argument("--transform", choices=("cos", "sin"), metavar="FN",
+                        help="Apply cos/sin of the field in degrees before regridding, as the port "
+                             "does for mwd -> cos_mwd/sin_mwd")
     parser.add_argument("--expand", action="store_true",
                         help="Stat the reduced grid expanded to a full 2-D grid (pygrib's default) "
                              "rather than the values as stored")
@@ -230,6 +363,20 @@ def main():
                 grid = "expanded 2-D grid" if args.expand else "stored values"
                 print_block(f"Message {msg.messagenumber} ({safe_get(msg, 'shortName')}), {grid}:",
                             value_stats(msg, args.expand))
+            return
+
+        if args.missing:
+            for msg in select(grbs, args.message, args.all):
+                print_block(f"Message {msg.messagenumber}:", missing_report(msg, args.expand))
+            return
+
+        if args.regrid:
+            matrix = load_matrix(args.matrix)
+            print(f"{args.matrix.name}: {matrix.shape[0]} target x {matrix.shape[1]} source, "
+                  f"{matrix.nnz} non-zeros, {matrix.nnz / matrix.shape[0]:.2f} per target point\n")
+            for msg in select(grbs, args.message, args.all):
+                print_block(f"Message {msg.messagenumber} ({safe_get(msg, 'shortName')}):",
+                            regrid_report(msg, matrix, args.transform))
             return
 
         if args.json is not None:

@@ -31,10 +31,12 @@ const METADATA_DIR: &str = "./data/aifs-single-mse-2.0/quiet_grub/anemoi-metadat
 const GRAPH_PATH: &str = "./data/aifs-single-mse-2.0_graph.safetensors";
 const CHECKPOINT_PATH: &str = "./data/aifs-single-mse-2.0.safetensors";
 // Datafiles. Fetched from ECMWF.
-const OPER_PATH: &str = "./data/20260810000000-0h-oper-fc.grib2";
-const WAVE_PATH: &str = "./data/20260810000000-0h-wave-fc.grib2";
+const OPER_PATH: &str = "./data/grib/20260821060000-0h-oper-fc.grib2";
+const WAVE_PATH: &str = "./data/grib/20260821060000-0h-wave-fc.grib2";
+const OPER_PATH_PREV: &str = "./data/grib/20260821000000-0h-oper-fc.grib2";
+const WAVE_PATH_PREV: &str = "./data/grib/20260821000000-0h-wave-fc.grib2";
 // Native N320, so it needs no regrid: the lsm forcing channel and the apply-mask source at once.
-const LSM_PATH: &str = "./data/lsm.grib";
+const LSM_PATH: &str = "./data/grib/lsm.grib";
 // The 0.25 degree -> N320 interpolation operator, from scripts/fetch_regrid_matrix.py.
 const REGRID_PATH: &str = "./data/regrid-0p25-to-n320.safetensors";
 
@@ -50,12 +52,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph_store = SafetensorsStore::from_file(GRAPH_PATH);
     let graph_data = GraphData::<MyBackend>::from_safetensors_store(&mut graph_store, &device)?;
 
+    let config = AifsV2Config::from_metadata(&metadata, NUM_CHANNELS);
+    let mut model = config.init::<MyBackend>(&graph_data, &device)?;
+    let mut store = aifs::checkpoint_store(CHECKPOINT_PATH);
+    let result = model.load_from(&mut store)?;
+    println!("\nloaded {CHECKPOINT_PATH}");
+    println!(
+        "  applied {}, missing {}, unused {}, skipped {}, errors {}",
+        result.applied.len(),
+        result.missing.len(), // burn-side paths not gotten data.
+        result.unused.len(),  // store-side paths not sent data.
+        result.skipped.len(),
+        result.errors.len(),
+    );
+
     // Same file as the model weights, different key namespace: these are the pre/post-processor
     // coefficient arrays, which are not module weights and so are read directly.
     let mut processor_store = SafetensorsStore::from_file(CHECKPOINT_PATH);
     let processors = Processors::<MyBackend>::load(&mut processor_store, &metadata, &device)?;
 
-    smoke_tests::<MyBackend>(&graph_data, &processors, &metadata, &device)
+    let regrid = grib::Regrid::load(REGRID_PATH)?;
+    let oper = vec![OPER_PATH_PREV, OPER_PATH];
+    let wave = vec![WAVE_PATH_PREV, WAVE_PATH];
+
+    // tensor_and_stats rather than tensor_from: the per-channel stats are taken off the host
+    // buffer before it reaches the device, which makes them the oracle for the ranges printed
+    // below. See grib::Stats.
+    let (x, _) =
+        grib::tensor_and_stats::<MyBackend>(&oper, &wave, LSM_PATH, &metadata, &regrid, &device)?;
+    println!("\ninput tensor {:?}", x.shape().dims::<4>());
+
+    let y = model.predict_step(&processors, x);
+    println!("\noutput tensor {:?}", y.shape().dims::<2>());
+
+    // smoke_tests::<MyBackend>(&graph_data, &processors, &metadata, &device)
+    Ok(())
 }
 
 // `MemoryReport` rather than `Backend`: forward_smoke_test reports the allocator, so the backend
@@ -141,7 +172,11 @@ fn input_tensor_smoke_test<B: Backend>(
     let oper = vec![OPER_PATH; metadata.multistep];
     let wave = vec![WAVE_PATH; metadata.multistep];
 
-    let x = grib::tensor_from::<B>(&oper, &wave, LSM_PATH, metadata, &regrid, device)?;
+    // tensor_and_stats rather than tensor_from: the per-channel stats are taken off the host
+    // buffer before it reaches the device, which makes them the oracle for the ranges printed
+    // below. See grib::Stats.
+    let (x, stats) =
+        grib::tensor_and_stats::<B>(&oper, &wave, LSM_PATH, metadata, &regrid, device)?;
     println!("\ninput tensor {:?}", x.shape().dims::<4>());
 
     // The imputer is the last thing that can remove a NaN, and it runs in pre. Everything the
@@ -164,14 +199,42 @@ fn input_tensor_smoke_test<B: Backend>(
             .reshape([metadata.latitudes.len()])
     };
 
+    // Two readings of the same column. `host` came off the CPU buffer and is exact. `min`/`max`
+    // go through the backend, which is the thing being checked: on wgpu those reductions return
+    // the identity (+/-f32::MAX) whenever the tensor holds a NaN, so they are masked first.
+    // Printing the host figures and flagging only disagreements keeps the common case quiet
+    // while making a regression in either direction loud.
+    let num_vars = metadata.model_input.full.len();
+    let stat = |name: &str, time: usize| &stats[time * num_vars + channel(name)].stats;
+
     for name in ["2t", "sp", "lsm", "swvl1", "cos_mwd", "insolation", "z_500"] {
         let values = column(name, last);
-        println!(
-            "  {name:<11} ch {:>3}  [{}, {}]",
-            channel(name),
-            values.clone().min().into_scalar(),
-            values.max().into_scalar(),
-        );
+        let nan = values.clone().is_nan();
+        let min = values
+            .clone()
+            .mask_fill(nan.clone(), f32::INFINITY)
+            .min()
+            .into_scalar()
+            .elem::<f32>();
+        let max = values
+            .mask_fill(nan, f32::NEG_INFINITY)
+            .max()
+            .into_scalar()
+            .elem::<f32>();
+
+        let s = stat(name, last);
+        println!("  {name:<11} ch {:>3}  {s}", channel(name));
+
+        // Exact equality is the right test: min and max accumulate nothing, so the two paths
+        // reduce the same f32 values to the same bits or they disagree for a reason.
+        let agrees = if s.finite() == 0 {
+            min == f32::INFINITY && max == f32::NEG_INFINITY
+        } else {
+            min == s.min && max == s.max
+        };
+        if !agrees {
+            println!("  {:<11}      device reduction says [{min}, {max}]", "");
+        }
     }
 
     // The two timesteps must be distinguishable, and distinguishable in the right direction: a
