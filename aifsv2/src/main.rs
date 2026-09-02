@@ -23,6 +23,7 @@ mod graph;
 mod grib;
 mod metadata;
 mod named_node_attributes;
+mod output;
 mod processors;
 mod transformer;
 
@@ -43,6 +44,10 @@ const WAVE_PATH_PREV: &str = "./data/grib/20260830180000-0h-wave-fc.grib2";
 const LSM_PATH: &str = "./data/grib/lsm.grib";
 // The 0.25 degree -> N320 interpolation operator, from scripts/fetch_regrid_matrix.py.
 const REGRID_PATH: &str = "./data/regrid-0p25-to-n320.safetensors";
+// N320 GRIB2 messages every output field is cloned from; see scripts/extract_grib_templates.py.
+const TEMPLATE_DIR: &str = "./data/templates";
+// Named for the base time and lead: the forecast valid at OPER_PATH's time plus one timestep.
+const OUTPUT_PATH: &str = "./data/output/20260831000000-6h.grib2";
 
 // config.model.num_channels, the latent width. Metadata does not parse it out of the raw JSON.
 const NUM_CHANNELS: usize = 1024;
@@ -88,6 +93,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let y = model.predict_step(&processors, x);
     println!("\noutput tensor {:?}", y.shape().dims::<2>());
+
+    // The base time is OPER_PATH's; one predict_step advances it by the model timestep.
+    let reference = Utc.with_ymd_and_hms(2026, 8, 31, 0, 0, 0).unwrap();
+    let templates = output::Templates::load(Path::new(TEMPLATE_DIR))?;
+    let messages = output::write_step(
+        Path::new(OUTPUT_PATH),
+        y,
+        &metadata,
+        &templates,
+        reference,
+        metadata.timestep,
+        &output::AIFS_SINGLE,
+    )?;
+    println!("wrote {messages} messages to {OUTPUT_PATH}");
 
     // smoke_tests::<MyBackend>(&graph_data, &processors, &metadata, &device)
     Ok(())

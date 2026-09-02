@@ -266,7 +266,7 @@ pub fn load_grib<P: AsRef<Path>>(path: P) -> Result<Vec<Field>, Error> {
 // flex scanner internal error" and a SIGSEGV. Every handle in this module is taken under this
 // lock, which is what makes the module safe to call from anywhere. Cargo's test harness runs
 // tests in parallel, which is how this was found.
-static CODES_MUTEX: Mutex<()> = Mutex::new(());
+pub(crate) static CODES_MUTEX: Mutex<()> = Mutex::new(());
 
 // Decode a file one message at a time.
 //
