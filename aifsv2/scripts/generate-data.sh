@@ -66,6 +66,12 @@ if [ ! -e data/regrid-0p25-to-n320.safetensors ]; then
     uv run python scripts/fetch_regrid_matrix.py
 fi
 
+# Output GRIB templates, decoded from anemoi-inference's builtin index. Committed, so
+# this only runs on a checkout that has lost them; needs the anemoi-inference repo.
+if [ ! -e data/templates/n320-pl.grib2 ] || [ ! -e data/templates/n320-sfc.grib2 ]; then
+    uv run scripts/extract_grib_templates.py --anemoi "${ANEMOI_INFERENCE:-../anemoi-inference}"
+fi
+
 # The two input base times, 6 h apart; existing files are skipped by the script.
 uv run python scripts/download_opendata.py \
     --start "$PREV_TIME" --end "$BASE_TIME" --freq 6 \
