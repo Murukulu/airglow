@@ -116,16 +116,16 @@ pub(crate) struct Field {
 /// Write one forecast step. `y` is `predict_step`'s `[grid, num_output_channels]` in physical
 /// units; `reference` is the forecast base time and `lead` the offset of this step from it.
 /// Returns the number of messages written.
-pub fn write_step<B: Backend>(
+pub fn write_step<B: Backend, const D: usize>(
     path: &Path,
-    y: Tensor<B, 2>,
+    tensor: Tensor<B, D>,
     metadata: &Metadata,
     templates: &Templates,
     reference: DateTime<Utc>,
     lead: Duration,
     encoding: &Encoding,
 ) -> Result<usize, Error> {
-    let host = y
+    let host = tensor
         .into_data()
         .to_vec::<f32>()
         .map_err(|e| Error::Data(format!("{e:?}")))?;

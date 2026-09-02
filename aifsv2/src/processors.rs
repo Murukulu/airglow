@@ -21,7 +21,7 @@ pub struct PreProcessed<B: Backend> {
     pub x: Tensor<B, 4>,
     /// Where the imputer filled, laid out over the *output* channels that inherit those NaN:
     /// `[batch * grid, vars_out]`. Already in the frame `post` needs, so it can mask back directly.
-    imputed: Tensor<B, 2, Bool>,
+    imputed_mask: Tensor<B, 2, Bool>,
 }
 
 impl<B: Backend> Processors<B> {
@@ -39,17 +39,17 @@ impl<B: Backend> Processors<B> {
 
     /// `x` is `[batch, time, grid, vars_in]` in physical units, NaN where the source had no value.
     pub fn pre(&self, x: Tensor<B, 4>) -> PreProcessed<B> {
-        let (x, imputed) = self.imputer.forward(x);
+        let (x, imputed_mask) = self.imputer.forward(x);
         PreProcessed {
             x: self.normalizer.forward(x),
-            imputed,
+            imputed_mask,
         }
     }
 
     /// `y` is the model's `[batch * grid, vars_out]`, still normalised. Returns physical units.
     pub fn post(&self, y: Tensor<B, 2>, pre: &PreProcessed<B>) -> Tensor<B, 2> {
         let y = self.normalizer.inverse(y);
-        let y = y.mask_fill(pre.imputed.clone(), f32::NAN);
+        let y = y.mask_fill(pre.imputed_mask.clone(), f32::NAN);
         self.conditional_nan.inverse(y)
     }
 }
