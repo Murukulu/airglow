@@ -233,10 +233,8 @@ fn fraction_total_var_may_not_be_one_of_its_variables() {
 #[test]
 fn checkpoint_boundings_hold_their_invariants() {
     let device = Default::default();
-    let metadata = Metadata::load(std::path::Path::new(
-        "./data/aifs-single-mse-2.0/quiet_grub/anemoi-metadata",
-    ))
-    .expect("checkpoint metadata");
+    let metadata = Metadata::load(std::path::Path::new("./data/quiet_grub/anemoi-metadata"))
+        .expect("checkpoint metadata");
 
     let width = metadata.model_output.full.len();
     let boundings = Bounding::<TestBackend>::new(

@@ -1,6 +1,6 @@
 """Inspect a GRIB file: summarise messages, query eccodes keys, dump metadata to JSON.
 
-Written for data/lsm.grib — the land-sea mask that data/inference.yaml feeds to the
+Written for data/grib/lsm.grib — the land-sea mask that data/inference.yaml feeds to the
 apply-mask pre-processor for sd/swvl1/swvl2. That file is a single GRIB1 message on the
 N320 reduced Gaussian grid (542,080 points), which is the grid AIFS itself runs on, so
 this doubles as a way to read out the grid layout for the Burn port.
@@ -36,12 +36,13 @@ Usage:
     python scripts/parse_grib.py --json                # -> lsm_keys.json
     python scripts/parse_grib.py --json -              # JSON to stdout
     python scripts/parse_grib.py -f other.grib -m 3 -s  # 3rd message of another file
-    python scripts/parse_grib.py -f data/20260810000000-0h-wave-fc.grib2 -a --missing
-    python scripts/parse_grib.py -f data/20260810000000-0h-wave-fc.grib2 -a --regrid
+    python scripts/parse_grib.py -f data/grib/20260831000000-0h-wave-fc.grib2 -a --missing
+    python scripts/parse_grib.py -f data/grib/20260831000000-0h-wave-fc.grib2 -a --regrid
     ... --regrid --transform cos -q shortName          # cos(mwd), as the port builds it
+    python scripts/parse_grib.py -f data/output/20260831000000-6h.grib2 -a --stats  # our output
 
-Requires pygrib (which brings eccodes). --regrid additionally needs scipy and safetensors;
-all three are in data/aifs-single-mse-2.0/quiet_grub/.venv.
+Requires pygrib (which brings eccodes); --regrid additionally needs scipy and safetensors.
+pygrib is not in pyproject.toml, so run this with an interpreter that has it.
 """
 
 import argparse
@@ -54,7 +55,7 @@ import numpy as np
 import pygrib
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PATH = ROOT / "data" / "lsm.grib"
+DEFAULT_PATH = ROOT / "data" / "grib" / "lsm.grib"
 DEFAULT_MATRIX = ROOT / "data" / "regrid-0p25-to-n320.safetensors"
 
 # Keys that are huge, redundant with `values`, or that eccodes only exposes as raw

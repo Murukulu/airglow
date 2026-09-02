@@ -26,13 +26,13 @@ caller must rotate each row by 180/0.25 = 720 columns before applying this. That
 lives in Rust, where the message's own keys are available; it is not baked in here.
 
 Usage:
-    data/aifs-single-mse-2.0/quiet_grub/.venv/bin/python scripts/fetch_regrid_matrix.py
+    uv run python scripts/fetch_regrid_matrix.py
     ... scripts/fetch_regrid_matrix.py --info          # resolve and describe, write nothing
     ... scripts/fetch_regrid_matrix.py --method nearest-neighbour --out other.safetensors
 
-Requires earthkit-regrid (which brings scipy) and safetensors. The checkpoint's venv at
-data/aifs-single-mse-2.0/quiet_grub/.venv has all three. Needs network on first run;
-earthkit caches the download, so later runs are offline.
+Requires earthkit-regrid (which brings scipy) and safetensors; the pyproject environment
+that `uv run` syncs has all three. Needs network on first run; earthkit caches the
+download, so later runs are offline.
 """
 
 import argparse

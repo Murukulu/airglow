@@ -46,11 +46,17 @@ fn imputer_round_trips_nan_from_input_to_output_channels() {
         Tensor::<TestBackend, 4>::from_floats([[[[0.0, 0.0, f32::NAN], [0.0, 0.0, 7.0]]]], &device);
 
     let (_, imputed) = imputer(&device).forward(x);
-    assert_eq!(imputed.dims(), [2, 4], "one row per grid point, output width");
+    assert_eq!(
+        imputed.dims(),
+        [2, 4],
+        "one row per grid point, output width"
+    );
 
     // The model's output: two grid points, four channels, all finite.
-    let y =
-        Tensor::<TestBackend, 2>::from_floats([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], &device);
+    let y = Tensor::<TestBackend, 2>::from_floats(
+        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+        &device,
+    );
     let restored = y
         .mask_fill(imputed, f32::NAN)
         .into_data()
@@ -68,8 +74,10 @@ fn imputer_round_trips_nan_from_input_to_output_channels() {
 fn imputer_records_the_first_timestep_only() {
     let device = Default::default();
     // [1, 2, 1, 3]: two timesteps, one grid point. Channel 2 is NaN at t=1 only.
-    let x =
-        Tensor::<TestBackend, 4>::from_floats([[[[0.0, 0.0, 9.0]], [[0.0, 0.0, f32::NAN]]]], &device);
+    let x = Tensor::<TestBackend, 4>::from_floats(
+        [[[[0.0, 0.0, 9.0]], [[0.0, 0.0, f32::NAN]]]],
+        &device,
+    );
 
     // Read back through int: wgpu stores Bool as U32, which to_vec::<bool> will not accept.
     let (_, imputed) = imputer(&device).forward(x);
