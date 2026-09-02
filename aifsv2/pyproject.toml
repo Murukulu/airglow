@@ -27,6 +27,9 @@ dependencies = [
     # earthkit's index and downloads it. Brings scipy; numpy already rides in with torch.
     # No == pin: not DESCO-patched, uv.lock carries the exact version.
     "earthkit-regrid>=0.4",
+    # parse_grib.py / plot_grib.py: GRIB reading (wheels bundle libeccodes) and maps.
+    "pygrib>=2.1",
+    "matplotlib>=3.8",
 ]
 
 [tool.uv]

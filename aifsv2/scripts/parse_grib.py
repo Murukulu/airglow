@@ -249,8 +249,8 @@ def load_matrix(path: Path):
     return matrix
 
 
-def regrid_report(msg, matrix, transform: str | None = None) -> dict:
-    """Push one message through the regrid and report what the model grid ends up holding.
+def regrid_values(msg, matrix, transform: str | None = None) -> tuple[np.ndarray, np.ndarray, int]:
+    """Push one message through the regrid: (source values, N320 values, row shift).
 
     Mirrors src/grib.rs exactly: the cos/sin transform (for mwd) runs on the source grid
     before the regrid, and the row rotation runs inside it. The matrix's input gridspec has
@@ -258,6 +258,8 @@ def regrid_report(msg, matrix, transform: str | None = None) -> dict:
     rolled by longitudeOfFirstGridPointInDegrees / iDirectionIncrementInDegrees columns
     first — 720 for a 0.25 degree file. Dropping that rotation leaves the global mean intact
     and moves a third of the points, which is why it is checked here rather than assumed.
+
+    Raises ValueError when the field is not on the matrix's source grid.
     """
     ni, nj = safe_get(msg, "Ni"), safe_get(msg, "Nj")
     lon_first = safe_get(msg, "longitudeOfFirstGridPointInDegrees")
@@ -265,8 +267,8 @@ def regrid_report(msg, matrix, transform: str | None = None) -> dict:
     values = stored_values(msg)
 
     if values.size != matrix.shape[1] or ni * nj != matrix.shape[1]:
-        return {"error": f"matrix takes {matrix.shape[1]} source points, "
-                         f"field has {values.size} ({ni} x {nj})"}
+        raise ValueError(f"matrix takes {matrix.shape[1]} source points, "
+                         f"field has {values.size} ({ni} x {nj})")
 
     if transform:
         radians = np.radians(values)
@@ -276,7 +278,17 @@ def regrid_report(msg, matrix, transform: str | None = None) -> dict:
     rolled = values.reshape(nj, ni)
     if shift:
         rolled = np.concatenate([rolled[:, ni - shift:], rolled[:, :ni - shift]], axis=1)
-    out = matrix @ rolled.ravel()
+    return values, matrix @ rolled.ravel(), shift
+
+
+def regrid_report(msg, matrix, transform: str | None = None) -> dict:
+    """Push one message through the regrid and report what the model grid ends up holding."""
+    try:
+        values, out, shift = regrid_values(msg, matrix, transform)
+    except ValueError as e:
+        return {"error": str(e)}
+    lon_first = safe_get(msg, "longitudeOfFirstGridPointInDegrees")
+    di = safe_get(msg, "iDirectionIncrementInDegrees")
 
     src_nan, out_nan = np.isnan(values), np.isnan(out)
     finite = out[~out_nan]
