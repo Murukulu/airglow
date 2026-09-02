@@ -39,11 +39,9 @@ impl<B: Backend> Processors<B> {
 
     /// `x` is `[batch, time, grid, vars_in]` in physical units, NaN where the source had no value.
     pub fn pre(&self, x: Tensor<B, 4>) -> PreProcessed<B> {
+        let x = self.normalizer.forward(x);
         let (x, imputed_mask) = self.imputer.forward(x);
-        PreProcessed {
-            x: self.normalizer.forward(x),
-            imputed_mask,
-        }
+        PreProcessed { x, imputed_mask }
     }
 
     /// `y` is the model's `[batch * grid, vars_out]`, still normalised. Returns physical units.
