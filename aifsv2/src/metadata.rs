@@ -81,6 +81,18 @@ pub enum BoundingConfig {
     },
 }
 
+// The MARS identity of a variable, which is also what names it in GRIB: `param` is the ecCodes
+// shortName, `levtype`/`levelist` become typeOfLevel/level. Only the keys output encoding
+// reads; the block also carries the training retrieval's class/date/expver, which describe
+// the dataset and not the forecast.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Mars {
+    pub param: String,
+    pub levtype: String,
+    pub levelist: Option<i64>,
+    pub stream: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Metadata {
     pub variables: Vec<String>, // The total possible variable space. The actual variables on inference and once infered vary.
@@ -113,6 +125,10 @@ pub struct Metadata {
     pub constant_in_time: Vec<String>, // Never recomputed; overlaps `computed_forcing`.
     pub imputer_zero: Vec<String>,     // Filled with 0 wherever the source data is NaN.
     pub boundings: Vec<BoundingConfig>, // Output clamps, in application order.
+    pub accumulations: Vec<String>,    // Summed from the forecast start rather than instantaneous.
+
+    // Every retrieved variable; the computed forcings have no MARS identity and are absent.
+    pub mars: HashMap<String, Mars>,
 
     pub nan_postprocessor_reference: String, // Reference variable for NaN masking
     pub nan_postprocessor_vars: Vec<String>, // Variables to be masked
@@ -247,6 +263,14 @@ impl Metadata {
         let nan_postprocessor_reference = conditional_nan_postprocessor_config.remap;
         let nan_postprocessor_vars = conditional_nan_postprocessor_config.nan;
 
+        let accumulations = flagged(|v| v.process.as_deref() == Some("accumulation"));
+        let mars = raw
+            .dataset
+            .variables_metadata
+            .iter()
+            .filter_map(|(name, meta)| meta.mars.clone().map(|mars| (name.clone(), mars)))
+            .collect();
+
         Ok(Metadata {
             var_to_input_channel: channel_map(
                 &variables,
@@ -266,6 +290,8 @@ impl Metadata {
             model_output: raw.data_indices.model.output,
             imputer_zero: raw.config.data.processors.const_imputer.config.zero,
             boundings: raw.config.model.bounding,
+            accumulations,
+            mars,
             latitudes,
             longitudes,
             nan_postprocessor_reference,
@@ -294,6 +320,11 @@ struct VarMeta {
     computed_forcing: bool,
     #[serde(default)]
     constant_in_time: bool,
+    // "accumulation" or absent; anemoi also defines average/maximum/minimum, unused here.
+    #[serde(default)]
+    process: Option<String>,
+    #[serde(default)]
+    mars: Option<Mars>,
 }
 
 #[derive(Deserialize)]
@@ -430,3 +461,7 @@ fn read_f64_array(path: &Path) -> Result<Vec<f64>, Error> {
     }
     Ok(values)
 }
+
+#[cfg(test)]
+#[path = "metadata_test.rs"]
+mod tests;

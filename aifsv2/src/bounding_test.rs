@@ -53,6 +53,8 @@ fn metadata() -> Metadata {
         constant_in_time: Vec::new(),
         imputer_zero: Vec::new(),
         boundings: Vec::new(),
+        accumulations: Vec::new(),
+        mars: HashMap::new(),
         nan_postprocessor_reference: String::new(),
         nan_postprocessor_vars: Vec::new(),
         latitudes: Vec::new(),
