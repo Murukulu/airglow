@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 # "cubecl" re-exports the runtime as burn::cubecl, which is where the allocator lives:
 # WgpuRuntime::client(&device).memory_usage(). Nothing else exposes GPU memory stats.
-burn = { version = "0.21.0", features = ["store", "wgpu", "cubecl"] }
+burn = { version = "0.21.0", features = ["store", "cuda", "wgpu", "cubecl"] }
 burn-store = "0.21.0"
 burn-cubecl = "0.21.0"
 burn-fusion = "0.21.0"

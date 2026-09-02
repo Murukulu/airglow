@@ -1,4 +1,5 @@
-use burn::{backend::wgpu::Wgpu, cubecl::MemoryUsage, prelude::*, tensor::ElementConversion};
+use burn::{backend::Cuda, cubecl::MemoryUsage, prelude::*, tensor::ElementConversion};
+
 // CubeRuntime and Fusion are not re-exported through the burn facade, so the MemoryReport impls
 // have to reach into the two internal crates directly. Both already resolve to the copies
 // burn-wgpu uses, but all three versions have to move together on an upgrade.
@@ -25,16 +26,19 @@ mod named_node_attributes;
 mod processors;
 mod transformer;
 
-type MyBackend = Wgpu;
+// Cuda rather than Wgpu: these hosts run the headless datacenter driver, which has no Vulkan
+// ICD, so wgpu finds no adapter. The default device is GPU 0; Cuda's Device carries an index
+// for the other seven. Swap back to burn::backend::wgpu::Wgpu on machines without CUDA.
+type MyBackend = Cuda;
 
-const METADATA_DIR: &str = "./data/aifs-single-mse-2.0/quiet_grub/anemoi-metadata";
+const METADATA_DIR: &str = "./data/quiet_grub/anemoi-metadata";
 const GRAPH_PATH: &str = "./data/aifs-single-mse-2.0_graph.safetensors";
 const CHECKPOINT_PATH: &str = "./data/aifs-single-mse-2.0.safetensors";
 // Datafiles. Fetched from ECMWF.
-const OPER_PATH: &str = "./data/grib/20260821060000-0h-oper-fc.grib2";
-const WAVE_PATH: &str = "./data/grib/20260821060000-0h-wave-fc.grib2";
-const OPER_PATH_PREV: &str = "./data/grib/20260821000000-0h-oper-fc.grib2";
-const WAVE_PATH_PREV: &str = "./data/grib/20260821000000-0h-wave-fc.grib2";
+const OPER_PATH: &str = "./data/grib/20260831000000-0h-oper-fc.grib2";
+const WAVE_PATH: &str = "./data/grib/20260831000000-0h-wave-fc.grib2";
+const OPER_PATH_PREV: &str = "./data/grib/20260830180000-0h-oper-fc.grib2";
+const WAVE_PATH_PREV: &str = "./data/grib/20260830180000-0h-wave-fc.grib2";
 // Native N320, so it needs no regrid: the lsm forcing channel and the apply-mask source at once.
 const LSM_PATH: &str = "./data/grib/lsm.grib";
 // The 0.25 degree -> N320 interpolation operator, from scripts/fetch_regrid_matrix.py.
