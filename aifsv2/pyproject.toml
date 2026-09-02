@@ -1,0 +1,41 @@
+# Python tooling for the aifsv2 Rust crate: converts an Anemoi inference .ckpt
+# into the safetensors artifacts the Rust runtime loads (weights + graph).
+#
+# These versions are DESCO-patched and only resolve from Artifactory, not
+# public PyPI. Configure credentials once per environment with:
+#   PIP_CONFIG_FILE=/dev/shm/pip.conf /desco/group/sysdevops/bin/artifactory --force pypi login
+# then export the creds for uv (see README/notes) before `uv sync`/`uv lock`.
+[project]
+name = "aifsv2-scripts"
+version = "0.1.0"
+description = "Extract weights and graph from an Anemoi .ckpt to safetensors for the aifsv2 Rust crate."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "torch==2.12.0",
+    "safetensors==0.5.3",
+    # anemoi's DotDict + omegaconf DictConfig/ListConfig live in the pickled
+    # model config; both must import for real or torch.load's unpickler stubs
+    # them and item-assignment / attribute access fails.
+    "anemoi-utils==0.5.12",
+    "omegaconf==2.4.0.dev1",
+    # HeteroData is read for real by extract_graph.py; without it the graph
+    # object is stubbed as an nn.Module and .node_types is missing.
+    "torch-geometric==2.8.0.post1",
+    # download_opendata.py: pulls the oper/wave GRIB inputs from ECMWF open data.
+    "ecmwf-opendata==0.3.34",
+    # fetch_regrid_matrix.py: resolves the 0.25deg->N320 interpolation matrix through
+    # earthkit's index and downloads it. Brings scipy; numpy already rides in with torch.
+    # No == pin: not DESCO-patched, uv.lock carries the exact version.
+    "earthkit-regrid>=0.4",
+]
+
+[tool.uv]
+# Script-only project: install the dependencies, don't build/install this dir.
+package = false
+
+# DESCO Artifactory PyPI. Credentials are NOT stored here — uv reads them from
+# UV_INDEX_ARTIFACTORY_USERNAME / UV_INDEX_ARTIFACTORY_PASSWORD (or ~/.netrc).
+[[tool.uv.index]]
+name = "artifactory"
+url = "https://artifactory.deshaw.com/artifactory/api/pypi/pypi/simple"
+default = true
