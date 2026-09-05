@@ -10,6 +10,7 @@ use crate::{
     backend::Backend,
     block::{GraphTransformerProcessorBlock, GraphTransformerProcessorBlockConfig},
     common::{PairTensor, TrainableTensor, TrainableTensorConfig},
+    debug::dump,
     graph::{self, GraphData},
 };
 
@@ -89,6 +90,8 @@ impl GraphTransformerForwardMapperConfig {
             self.qk_norm,
             self.edge_pre_mlp,
         )
+        .with_dump_tag("enc".into())
+        .with_dump_intermediates(true)
         .init(device);
 
         GraphTransformerForwardMapper {
@@ -109,11 +112,15 @@ impl GraphTransformerForwardMapperConfig {
 impl<B: Backend> GraphTransformerForwardMapper<B> {
     pub fn forward(&self, x: PairTensor<B, 2>, batch_size: usize) -> PairTensor<B, 2> {
         let edge_attr = self.trainable.forward(self.edge_attr.clone(), batch_size);
+        dump("enc_edge_attr", &edge_attr);
         let (edge_index_src, edge_index_dst) =
             graph::expand_edges(self.edge_index.clone(), self.edge_inc.clone(), batch_size);
 
+        let (x_src, x_dst) = self.pre_process(x.clone());
+        dump("enc_x_src_emb", &x_src);
+        dump("enc_x_dst_emb", &x_dst);
         let (_, x_dst) = self.proc.forward(
-            self.pre_process(x.clone()),
+            (x_src, x_dst),
             edge_attr,
             edge_index_src,
             edge_index_dst,

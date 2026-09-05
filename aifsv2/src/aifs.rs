@@ -7,6 +7,7 @@ use crate::{
     backend::Backend,
     bounding::{Bounding, BoundingType},
     common::PairTensor,
+    debug::dump,
     decoder::{GraphTransformerBackwardMapper, GraphTransformerBackwardMapperConfig},
     encoder::{GraphTransformerForwardMapper, GraphTransformerForwardMapperConfig},
     graph::GraphData,
@@ -111,6 +112,10 @@ impl AifsV2Config {
             self.num_heads,
             self.window_size,
         )
+        // Every layer's output, and every stage of layer 0: the layers share the code, so one
+        // block's intermediates localise a fault within it.
+        .with_dump_outputs(true)
+        .with_dump_layers(vec![0])
         .init(device);
         let decoder = GraphTransformerBackwardMapperConfig::new(
             self.num_channels,
@@ -231,17 +236,25 @@ impl<B: Backend> AifsV2<B> {
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 2> {
         let batch = x.shape().dims::<4>()[0];
         let (x_latent, x_skip) = self.assemble_input(x);
+        dump("x_latent_data", &x_latent.0);
+        dump("x_latent_hidden", &x_latent.1);
 
         // The forward mapper passes its source through untouched: x_data_latent survives the
         // encoder and is what the decoder re-embeds with its own emb_nodes_dst.
         let (x_data_latent, x_latent) = self.encoder.forward(x_latent, batch);
+        dump("enc_x_latent", &x_latent);
 
         // latent_skip: true in the checkpoint config.
         let x_latent = self.proc.forward(x_latent.clone()) + x_latent;
+        dump("proc_x_latent", &x_latent);
 
         let x_out = self.decoder.forward((x_latent, x_data_latent), batch);
+        dump("dec_x_out", &x_out);
 
-        self.assemble_output(x_out, x_skip)
+        let x_out = self.assemble_output(x_out, x_skip);
+        dump("bounded_x_out", &x_out);
+
+        x_out
     }
 
     /// One step end to end: the anemoi `predict_step`, pre- and post-processing included.
@@ -249,9 +262,14 @@ impl<B: Backend> AifsV2<B> {
     /// `x` is `[batch, time, grid, vars]` in physical units, NaN where the source had no value.
     /// The return is `[batch * grid, num_output_channels]`, back in physical units.
     pub fn predict_step(&self, processors: &Processors<B>, x: Tensor<B, 4>) -> Tensor<B, 2> {
+        dump("x", &x);
         let pre = processors.pre(x);
+        dump("pre_x", &pre.x);
         let y_hat = self.forward(pre.x.clone());
-        processors.post(y_hat, &pre)
+        dump("y_hat", &y_hat);
+        let post = processors.post(y_hat, &pre);
+        dump("post", &post);
+        post
     }
 }
 

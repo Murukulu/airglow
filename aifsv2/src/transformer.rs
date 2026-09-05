@@ -1,6 +1,7 @@
 use crate::{
     backend::{self, Backend},
     common::{MultiLayerPreceptron, MultiLayerPreceptronConfig},
+    debug::dump,
 };
 use burn::{
     nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig},
@@ -24,7 +25,11 @@ struct MultiHeadSelfAttentionConfig {
 
     #[config(default = false)]
     qkv_bias: bool, // Whether to enable bias in q,k,v linear projections.
-                    // Softcap is default false and we do not allow it to be set.
+    // Softcap is default false and we do not allow it to be set.
+
+    // Prefix for debug::dump of the projections and attention output; empty dumps nothing.
+    #[config(default = "String::new()")]
+    dump_tag: String,
 }
 
 #[derive(Module, Debug)]
@@ -36,6 +41,7 @@ struct MultiHeadSelfAttention<B: Backend> {
 
     num_heads: usize,
     head_dim: usize,
+    dump_tag: String,
 }
 
 impl MultiHeadSelfAttentionConfig {
@@ -67,6 +73,7 @@ impl MultiHeadSelfAttentionConfig {
             projection,
             num_heads: self.num_heads,
             head_dim: self.num_channels / self.num_heads,
+            dump_tag: self.dump_tag.clone(),
         }
     }
 }
@@ -83,6 +90,14 @@ impl<B: Backend> MultiHeadSelfAttention<B> {
             self.num_heads * self.head_dim
         );
 
+        // The projections are dumped as [batch*grid, channels], before the head split, which is
+        // the layout anemoi's lin_q/lin_k/lin_v produce.
+        let query = self.lin_q.forward(x.clone());
+        let key = self.lin_k.forward(x.clone());
+        let value = self.lin_v.forward(x.clone());
+        self.dump("query", &query);
+        self.dump("key", &key);
+        self.dump("value", &value);
         // swap_dims is a strided view and burn's flash attention kernel ignores strides (it reads
         // heads and rows interleaved: attention_test.rs, Swapped rows), so each is copied out to a
         // real [b, H, g, D] buffer first.
@@ -92,9 +107,10 @@ impl<B: Backend> MultiHeadSelfAttention<B> {
                     .swap_dims(1, 2),
             )
         };
-        let query = split(self.lin_q.forward(x.clone()));
-        let key = split(self.lin_k.forward(x.clone()));
-        let value = split(self.lin_v.forward(x.clone()));
+        let (query, key, value) = (split(query), split(key), split(value));
+        self.dump_split("query_rearranged", &query);
+        self.dump_split("key_rearranged", &key);
+        self.dump_split("value_rearranged", &value);
 
         // Use fused attention.
         let attn = attention(
@@ -111,7 +127,30 @@ impl<B: Backend> MultiHeadSelfAttention<B> {
         ); // [b, H, g, D]
 
         let attn = attn.swap_dims(1, 2).reshape([b, g, c]); // [b, g, H, D] -> [b, g, c]
-        self.projection.forward(attn)
+        self.dump("attn", &attn);
+        let out = self.projection.forward(attn);
+        self.dump("proj", &out);
+        out
+    }
+
+    // debug::dump under this attention's tag as [batch*grid, channels]: `<tag>_<name>`, nothing
+    // when the tag is empty.
+    fn dump(&self, name: &str, t: &Tensor<B, 3>) {
+        if !self.dump_tag.is_empty() {
+            let [b, g, c] = t.shape().dims();
+            dump(
+                &format!("{}_{name}", self.dump_tag),
+                &t.clone().reshape([b * g, c]),
+            );
+        }
+    }
+
+    // Like dump, but for the head-split q/k/v: their [batch, heads, grid, head_dim] shape is kept
+    // as-is, since unlike the projections there is no [batch*grid, channels] layout to flatten to.
+    fn dump_split(&self, name: &str, t: &Tensor<B, 4>) {
+        if !self.dump_tag.is_empty() {
+            dump(&format!("{}_{name}", self.dump_tag), t);
+        }
     }
 }
 
@@ -122,6 +161,13 @@ struct TransformerProcessorBlockConfig {
     window_size: usize,
     num_heads: usize,
     // We do not implement or use q_norm, k_norm.
+
+    // Prefix for debug::dump of the block output; empty dumps nothing. With dump_intermediates
+    // every stage of forward is dumped too. TransformerProcessorConfig sets both per layer.
+    #[config(default = "String::new()")]
+    dump_tag: String,
+    #[config(default = false)]
+    dump_intermediates: bool,
 }
 
 #[derive(Module, Debug)]
@@ -130,6 +176,8 @@ struct TransformerProcessorBlock<B: Backend> {
     layer_norm_mlp: LayerNorm<B>,
     attention: MultiHeadSelfAttention<B>,
     mlp: MultiLayerPreceptron<B>,
+    dump_tag: String,
+    dump_intermediates: bool,
 }
 
 impl TransformerProcessorBlockConfig {
@@ -137,8 +185,12 @@ impl TransformerProcessorBlockConfig {
         let layer_norm_attention = LayerNormConfig::new(self.num_channels).init(device);
         let layer_norm_mlp = LayerNormConfig::new(self.num_channels).init(device);
 
-        let attention =
-            MultiHeadSelfAttentionConfig::new(self.num_channels, self.num_heads).init(device);
+        let attention = MultiHeadSelfAttentionConfig::new(self.num_channels, self.num_heads)
+            .with_dump_tag(match self.dump_intermediates {
+                true => self.dump_tag.clone(),
+                false => String::new(),
+            })
+            .init(device);
 
         // Cast forward and back, with activation in the middle. I think this is an autoencoder.
         let mlp =
@@ -150,6 +202,8 @@ impl TransformerProcessorBlockConfig {
             layer_norm_mlp,
             attention,
             mlp,
+            dump_tag: self.dump_tag.clone(),
+            dump_intermediates: self.dump_intermediates,
         }
     }
 }
@@ -159,14 +213,35 @@ impl<B: Backend> TransformerProcessorBlock<B> {
         // Attention takes 3D tensor where first dim is batch_size, so we unsqueeze here.
         // For this, we have a constant batch_size of 1. This is because graph batches are
         // just disjoint sub-graphs.
-        let x_norm = self.layer_norm_attention.forward(x.clone()).unsqueeze();
-        let attn = self.attention.forward(x_norm);
+        let x_norm = self.layer_norm_attention.forward(x.clone());
+        self.dump_intermediate("x_norm", &x_norm);
+        let attn = self.attention.forward(x_norm.unsqueeze());
 
         // Drop the batch, since it is just one. Then add to input.
         let x = x + attn.squeeze::<2>();
+        self.dump_intermediate("attn_res", &x);
 
         // Apply x + Lin(Activation(Lin(LayerNorm(x)))).
-        x.clone() + self.mlp.forward(self.layer_norm_mlp.forward(x))
+        let mlp_norm = self.layer_norm_mlp.forward(x.clone());
+        self.dump_intermediate("mlp_norm", &mlp_norm);
+        let mlp = self.mlp.forward(mlp_norm);
+        self.dump_intermediate("mlp", &mlp);
+        let out = x + mlp;
+        self.dump("out", &out);
+        out
+    }
+
+    // debug::dump under this block's tag: `<tag>_<name>`, nothing when the tag is empty.
+    fn dump(&self, name: &str, t: &Tensor<B, 2>) {
+        if !self.dump_tag.is_empty() {
+            dump(&format!("{}_{name}", self.dump_tag), t);
+        }
+    }
+
+    fn dump_intermediate(&self, name: &str, t: &Tensor<B, 2>) {
+        if self.dump_intermediates {
+            self.dump(name, t);
+        }
     }
 }
 
@@ -182,6 +257,16 @@ struct TransformerProcessorChunkConfig {
     #[config(default = 4)]
     mlp_hidden_ratio: usize,
     // We do not implement or use q_norm, k_norm.
+
+    // Global index of this chunk's first block: blocks are named proc<layer> with the layer
+    // counted across chunks, as anemoi numbers them.
+    #[config(default = 0)]
+    layer_offset: usize,
+    // TransformerProcessorConfig's knobs, passed down.
+    #[config(default = false)]
+    dump_outputs: bool,
+    #[config(default = "Vec::new()")]
+    dump_layers: Vec<usize>,
 }
 
 #[derive(Module, Debug)]
@@ -191,17 +276,23 @@ struct TransformerProcessorChunk<B: Backend> {
 
 impl TransformerProcessorChunkConfig {
     fn init<B: Backend>(&self, device: &B::Device) -> TransformerProcessorChunk<B> {
-        let blocks = vec![
+        let blocks = (0..self.num_layers).map(|i| {
+            let layer = self.layer_offset + i;
+            let intermediates = self.dump_layers.contains(&layer);
             TransformerProcessorBlockConfig::new(
                 self.num_channels,
                 self.num_channels * self.mlp_hidden_ratio,
                 self.window_size,
-                self.num_heads
-            );
-            self.num_layers
-        ];
+                self.num_heads,
+            )
+            .with_dump_tag(match self.dump_outputs || intermediates {
+                true => format!("proc{layer}"),
+                false => String::new(),
+            })
+            .with_dump_intermediates(intermediates)
+        });
         TransformerProcessorChunk {
-            blocks: blocks.iter().map(|b| b.init(device)).collect(),
+            blocks: blocks.map(|b| b.init(device)).collect(),
         }
     }
 }
@@ -227,6 +318,14 @@ pub struct TransformerProcessorConfig {
 
     #[config(default = 4)]
     mlp_hidden_ratio: usize,
+
+    // Debug dumps under the tag `proc<layer>`, 0-based across chunks, the names
+    // scripts/ref_processor.py writes. dump_outputs writes every block's output (proc<layer>_out,
+    // [40320, 1024] f32 per layer); dump_layers lists the layers that also dump every stage.
+    #[config(default = false)]
+    dump_outputs: bool,
+    #[config(default = "Vec::new()")]
+    dump_layers: Vec<usize>,
 }
 
 #[derive(Module, Debug)]
@@ -251,18 +350,17 @@ impl TransformerProcessorConfig {
         );
 
         // num_chunks chunks of chunk_size blocks each, for num_layers blocks in total.
-        let proc = vec![
-            TransformerProcessorChunkConfig::new(
-                self.num_channels,
-                self.chunk_size(),
-                self.window_size,
-            )
-            .with_num_heads(self.num_heads)
-            .with_mlp_hidden_ratio(self.mlp_hidden_ratio);
-            self.num_chunks
-        ];
+        let chunk_size = self.chunk_size();
+        let proc = (0..self.num_chunks).map(|c| {
+            TransformerProcessorChunkConfig::new(self.num_channels, chunk_size, self.window_size)
+                .with_num_heads(self.num_heads)
+                .with_mlp_hidden_ratio(self.mlp_hidden_ratio)
+                .with_layer_offset(c * chunk_size)
+                .with_dump_outputs(self.dump_outputs)
+                .with_dump_layers(self.dump_layers.clone())
+        });
         TransformerProcessor {
-            proc: proc.iter().map(|p| p.init(device)).collect(),
+            proc: proc.map(|p| p.init(device)).collect(),
         }
     }
 }

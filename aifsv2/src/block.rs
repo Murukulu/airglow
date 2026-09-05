@@ -9,6 +9,7 @@ use burn::{
 use crate::{
     backend::Backend,
     common::{MultiLayerPreceptron, MultiLayerPreceptronConfig, PairTensor, graph_tranformer_conv},
+    debug::dump,
 };
 
 // Ref:
@@ -28,6 +29,14 @@ pub struct GraphTransformerProcessorBlockConfig {
     #[config(default = false)]
     update_src_nodes: bool,
     // We removed all dropout params, since we are not intending to train.
+
+    // Prefix for debug::dump of the attention output stages; empty dumps nothing. The block is
+    // shared by the encoder and decoder, so each needs its own to keep the files apart. With
+    // dump_intermediates the normed inputs, residual and q/k/v/e projections are dumped too.
+    #[config(default = "String::new()")]
+    dump_tag: String,
+    #[config(default = false)]
+    dump_intermediates: bool,
 }
 
 // For more context related to GraphTransformers, see paper https://arxiv.org/pdf/2403.10667.
@@ -183,9 +192,12 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
             self.layer_norm_attention_src.forward(x.clone().0),
             self.layer_norm_attention_dst.forward(x.clone().1),
         );
+        self.dump_intermediate("x_src_norm", &x.0);
+        self.dump_intermediate("x_dst_norm", &x.1);
 
         // Compute residual.
         let res = self.lin_self.forward(x.clone().1); // [n_dst, F]
+        self.dump_intermediate("x_r", &res);
 
         // Generate projection values and reshape. A 3D tensor is required for graph conv. New shapes:
         // query: [n_dst, H, C]
@@ -221,9 +233,12 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
             n_dst,
         )
         .flatten(1, 2); // [n_dst, H, C] -> [n_dst, H*C] = [n_dst, F]
+        self.dump("conv", &msg);
 
         let out = self.projection.forward(msg + res); // [n_dst, F]
+        self.dump("proj", &out);
         let out = out + x_skip_connection.clone().1; // [n_dst, F]
+        self.dump("attn_out", &out);
 
         // Generate new pair tensor.
         let nodes_new_dst = self
@@ -256,14 +271,31 @@ impl<B: Backend> GraphTransformerProcessorBlock<B> {
         let h = self.conf.num_heads as i64;
         let c = self.conf.out_channels_conv() as i64;
 
-        // Project and reshape by expanding matrix into tensor..
-        let q = self.lin_query.forward(x_dst).reshape([-1, h, c]);
-        let k = self.lin_key.forward(x_src.clone()).reshape([-1, h, c]);
-        let v = self.lin_value.forward(x_src).reshape([-1, h, c]);
+        // Project, then reshape by expanding matrix into tensor.
+        let q = self.lin_query.forward(x_dst);
+        let k = self.lin_key.forward(x_src.clone());
+        let v = self.lin_value.forward(x_src);
         // Anemoi does not do an edge attribute projection, so we do not either.
-        let e = self.lin_edge.forward(edge_attr).reshape([-1, h, c]);
+        let e = self.lin_edge.forward(edge_attr);
+        self.dump_intermediate("query", &q);
+        self.dump_intermediate("key", &k);
+        self.dump_intermediate("value", &v);
+        self.dump_intermediate("edges", &e);
 
-        [q, k, v, e]
+        [q, k, v, e].map(|t| t.reshape([-1, h, c]))
+    }
+
+    // debug::dump under this block's tag: `<tag>_<name>`, nothing when the tag is empty.
+    fn dump(&self, name: &str, t: &Tensor<B, 2>) {
+        if !self.conf.dump_tag.is_empty() {
+            dump(&format!("{}_{name}", self.conf.dump_tag), t);
+        }
+    }
+
+    fn dump_intermediate(&self, name: &str, t: &Tensor<B, 2>) {
+        if self.conf.dump_intermediates {
+            self.dump(name, t);
+        }
     }
 }
 

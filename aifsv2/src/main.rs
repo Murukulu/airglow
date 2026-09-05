@@ -22,6 +22,7 @@ mod backend;
 mod block;
 mod bounding;
 mod common;
+mod debug;
 mod decoder;
 mod encoder;
 mod forcings;

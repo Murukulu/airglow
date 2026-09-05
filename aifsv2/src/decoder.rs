@@ -7,6 +7,7 @@ use crate::{
     backend::Backend,
     block::{GraphTransformerProcessorBlock, GraphTransformerProcessorBlockConfig},
     common::{PairTensor, TrainableTensor, TrainableTensorConfig},
+    debug::dump,
     graph::{self, GraphData},
 };
 
@@ -89,6 +90,9 @@ impl GraphTransformerBackwardMapperConfig {
             self.qk_norm,
             self.edge_pre_mlp,
         )
+        // No intermediates: query alone is [542080, 1024], and scripts/ref_decoder.py writes no
+        // twins for them.
+        .with_dump_tag("dec".into())
         .init(device);
 
         GraphTransformerBackwardMapper {
@@ -110,18 +114,22 @@ impl GraphTransformerBackwardMapperConfig {
 impl<B: Backend> GraphTransformerBackwardMapper<B> {
     pub fn forward(&self, x: PairTensor<B, 2>, batch_size: usize) -> Tensor<B, 2> {
         let edge_attr = self.trainable.forward(self.edge_attr.clone(), batch_size);
+        dump("dec_edge_attr", &edge_attr);
         let (edge_index_src, edge_index_dst) =
             graph::expand_edges(self.edge_index.clone(), self.edge_inc.clone(), batch_size);
 
         // Apply pre-processing then processing.
+        let (x_src, x_dst) = self.pre_process(x);
+        dump("dec_x_dst_emb", &x_dst);
         let (_, x_dst) = self.proc.forward(
-            self.pre_process(x.clone()),
+            (x_src, x_dst),
             edge_attr,
             edge_index_src,
             edge_index_dst,
             self.n_src_base * batch_size,
             self.n_dst_base * batch_size,
         );
+        dump("dec_block_out", &x_dst);
 
         // Return the result of post-processing.
         self.post_process(x_dst)
@@ -137,8 +145,9 @@ impl<B: Backend> GraphTransformerBackwardMapper<B> {
 
     // Linear projection of the destination-domain input features.
     fn post_process(&self, x_dst: Tensor<B, 2>) -> Tensor<B, 2> {
-        self.node_data_extractor
-            .forward(self.node_data_extractor_norm.forward(x_dst))
+        let x_dst = self.node_data_extractor_norm.forward(x_dst);
+        dump("dec_norm", &x_dst);
+        self.node_data_extractor.forward(x_dst)
     }
 }
 
