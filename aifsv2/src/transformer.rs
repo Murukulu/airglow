@@ -98,9 +98,12 @@ impl<B: Backend> MultiHeadSelfAttention<B> {
         self.dump("query", &query);
         self.dump("key", &key);
         self.dump("value", &value);
-        // swap_dims is a strided view and burn's flash attention kernel ignores strides (it reads
-        // heads and rows interleaved: attention_test.rs, Swapped rows), so each is copied out to a
-        // real [b, H, g, D] buffer first.
+        // swap_dims is a strided view and burn's flash attention kernel misreads the query in that
+        // layout (attention_test.rs, Swapped rows; #31), so each is copied out to a real
+        // [b, H, g, D] buffer first.
+        //
+        // TODO(saiputravu): Copy only the query. only_the_query_needs_to_be_contiguous shows key and
+        // value are read correctly as views, bit for bit; the two copies are 165 MB each per layer.
         let split = |t: Tensor<B, 3>| {
             backend::contiguous(
                 t.reshape([b, g, self.num_heads, self.head_dim])
