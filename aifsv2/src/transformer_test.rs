@@ -2,10 +2,10 @@ use super::*;
 use burn::module::{ModuleMapper, Param};
 use burn_store::ModuleSnapshot;
 
-// wgpu rather than ndarray for consistency with the rest of the suite: the mapper tests need the
-// real kernels for duplicate-index aggregation, and there is no reason for the processor to be
-// tested on a different backend from the modules it sits between.
-type TestBackend = burn::backend::wgpu::Wgpu;
+// A GPU backend rather than ndarray for consistency with the rest of the suite: the mapper tests
+// need the real kernels for duplicate-index aggregation, and there is no reason for the processor
+// to be tested on a different backend from the modules it sits between.
+use crate::test_backend::TestBackend;
 
 // Small and deliberately distinct: N (4) != C (8) != HIDDEN (16), so a transposed or swapped
 // dimension cannot accidentally typecheck. HEADS divides C, which MultiHeadAttentionConfig

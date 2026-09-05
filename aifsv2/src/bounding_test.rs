@@ -4,7 +4,7 @@ use std::time::Duration;
 use super::*;
 use crate::metadata::IndexSet;
 
-type TestBackend = burn::backend::wgpu::Wgpu;
+use crate::test_backend::TestBackend;
 
 // A four-channel output space. `tp` is the referent for the FractionBounding cases and `cp` the
 // fraction of it; `other` is a channel no bounding names, which catches a mask that is too wide.

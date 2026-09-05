@@ -1,9 +1,9 @@
 use super::*;
 use burn_store::ModuleSnapshot;
 
-// Must be wgpu, not ndarray, for the same reason as common_test.rs: duplicate-index safety is a
-// property of the kernel, not of Burn, and the decoder's mean destination degree is 3.
-type TestBackend = burn::backend::wgpu::Wgpu;
+// Must be a GPU backend, not ndarray, for the same reason as common_test.rs: duplicate-index
+// safety is a property of the kernel, not of Burn, and the decoder's mean destination degree is 3.
+use crate::test_backend::TestBackend;
 
 // Small, deliberately distinct widths. hidden_dim (8) != in_channels_dst (5) != out_channels_dst
 // (3) so that a mixed-up dimension cannot accidentally typecheck.

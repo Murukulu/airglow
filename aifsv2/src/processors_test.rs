@@ -2,7 +2,7 @@ use burn::tensor::Tolerance;
 
 use super::*;
 
-type TestBackend = burn::backend::wgpu::Wgpu;
+use crate::test_backend::TestBackend;
 type TestDevice = Device<TestBackend>;
 
 // Three input channels, four output channels. Input channel 0 is filled but has no output, input

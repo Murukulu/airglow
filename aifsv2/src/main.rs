@@ -25,6 +25,8 @@ mod metadata;
 mod named_node_attributes;
 mod output;
 mod processors;
+#[cfg(test)]
+mod test_backend;
 mod transformer;
 
 // Cuda rather than Wgpu: these hosts run the headless datacenter driver, which has no Vulkan

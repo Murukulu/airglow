@@ -2,10 +2,10 @@ use super::*;
 
 use chrono::Utc;
 
-// wgpu rather than ndarray to match the rest of the suite. Nothing here depends on the backend
-// the way common_test.rs does -- these are all elementwise ops -- but the golden values are only
-// meaningful against the backend we actually ship.
-type TestBackend = burn::backend::wgpu::Wgpu;
+// A GPU backend rather than ndarray to match the rest of the suite. Nothing here depends on the
+// backend the way common_test.rs does -- these are all elementwise ops -- but the golden values
+// are only meaningful against the backend we actually ship.
+use crate::test_backend::TestBackend;
 
 // Reference values stay f64 -- that is what earthkit produced, and rounding them to f32 here
 // would quietly widen the tolerance by exactly the amount we are trying to measure.

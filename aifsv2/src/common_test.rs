@@ -1,9 +1,9 @@
 use super::*;
 
-// Must be wgpu, not ndarray. Duplicate-index safety is a property of the kernel, not of Burn:
-// burn-ndarray accumulates duplicates correctly under every primitive (one sequential host
-// loop), so a CPU test would pass on an aggregation that is wrong on the backend we ship.
-type TestBackend = burn::backend::wgpu::Wgpu;
+// Must be a GPU backend, not ndarray (see test_backend.rs): duplicate-index safety is a property
+// of the kernel, not of Burn, and a CPU test would pass on an aggregation that is wrong on the
+// backend we ship.
+use crate::test_backend::TestBackend;
 
 fn assert_close(got: Vec<f32>, want: &[f32], tol: f32) {
     assert_eq!(got.len(), want.len(), "length mismatch");

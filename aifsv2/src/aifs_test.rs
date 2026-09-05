@@ -6,10 +6,10 @@ use burn::module::{ModuleMapper, Param};
 
 use crate::metadata::IndexSet;
 
-// wgpu rather than ndarray for the same reason as the other suites: the scatter-adds in
+// A GPU backend rather than ndarray for the same reason as the other suites: the scatter-adds in
 // graph_tranformer_conv and in the prognostic residual both hit duplicate indices, and
 // duplicate-index safety is a property of the kernel.
-type TestBackend = burn::backend::wgpu::Wgpu;
+use crate::test_backend::TestBackend;
 
 // The real channel counts, so the input layout under test is the one the real model sees.
 const NUM_INPUT_CHANNELS: usize = 106;

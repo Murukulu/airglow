@@ -1,6 +1,6 @@
 use super::*;
 
-type TestBackend = burn::backend::wgpu::Wgpu;
+use crate::test_backend::TestBackend;
 
 // Regression test for get_qkve being handed the full attention width where it needs
 // out_channels_conv. The einops line this ports splits the feature axis into
