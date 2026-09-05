@@ -34,9 +34,21 @@ pub trait Backend: burn::tensor::backend::Backend {
         indices: IntTensor<Self>,
         value: FloatTensor<Self>,
     ) -> FloatTensor<Self>;
+
+    // The same values in a freshly laid out row-major buffer; a no-op when already so. burn has
+    // no tensor-level way to ask for this (reshape to the same shape is a no-op), and
+    // burn-cubecl's flash attention reads its inputs as if they were contiguous, so the strided
+    // views swap_dims produces have to be copied before they reach it (see attention_test.rs).
+    fn float_contiguous(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
 }
 
-// Tensor-level entry point, so callers never touch primitives.
+// Tensor-level entry points, so callers never touch primitives.
+pub fn contiguous<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Tensor<B, D> {
+    Tensor::from_primitive(TensorPrimitive::Float(B::float_contiguous(
+        tensor.into_primitive().tensor(),
+    )))
+}
+
 pub fn scatter_max<B: Backend, const D: usize>(
     tensor: Tensor<B, D>,
     dim: usize,
@@ -61,6 +73,10 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> Backend
         value: FloatTensor<Self>,
     ) -> FloatTensor<Self> {
         scatter_max::select_assign_max(tensor, dim, indices, value)
+    }
+
+    fn float_contiguous(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
+        burn_cubecl::kernel::into_contiguous(tensor)
     }
 }
 
@@ -118,5 +134,43 @@ impl<B: FusionBackend + Backend> Backend for Fusion<B> {
             )
             .pop()
             .expect("scatter_max registers exactly one output")
+    }
+
+    fn float_contiguous(tensor: FloatTensor<Self>) -> FloatTensor<Self> {
+        #[derive(Debug)]
+        struct ContiguousOp<B: FusionBackend> {
+            desc: CustomOpIr,
+            _b: PhantomData<B>,
+        }
+
+        impl<B: FusionBackend + Backend> Operation<B::FusionRuntime> for ContiguousOp<B> {
+            fn execute(&self, handles: &mut HandleContainer<B::Handle>) {
+                let ([tensor], [out]) = self.desc.as_fixed::<1, 1>();
+                let tensor = handles.get_float_tensor::<B>(tensor);
+                let output = B::float_contiguous(tensor);
+                handles.register_float_tensor::<B>(&out.id, output);
+            }
+        }
+
+        let streams = OperationStreams::with_inputs([&tensor]);
+        let client = tensor.client.clone();
+        let out = TensorIr::uninit(
+            client.create_empty_handle(),
+            tensor.shape.clone(),
+            tensor.dtype,
+        );
+        let desc = CustomOpIr::new("aifs::contiguous", &[tensor.into_ir()], &[out]);
+
+        client
+            .register(
+                streams,
+                OperationIr::Custom(desc.clone()),
+                ContiguousOp::<B> {
+                    desc,
+                    _b: PhantomData,
+                },
+            )
+            .pop()
+            .expect("contiguous registers exactly one output")
     }
 }

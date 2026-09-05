@@ -21,3 +21,8 @@ eccodes = { version = "0.14.0", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 cubecl = "0.10.0"
+
+[dev-dependencies]
+# Names burn-cubecl's flash-attention strategies so attention_test.rs can run each one against
+# the fallback; burn-cubecl depends on this exact version but does not re-export it.
+cubek = { version = "0.2.0", default-features = false, features = ["attention"] }

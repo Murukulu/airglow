@@ -1,5 +1,5 @@
 use crate::{
-    backend::Backend,
+    backend::{self, Backend},
     common::{MultiLayerPreceptron, MultiLayerPreceptronConfig},
 };
 use burn::{
@@ -83,21 +83,18 @@ impl<B: Backend> MultiHeadSelfAttention<B> {
             self.num_heads * self.head_dim
         );
 
-        let query = self
-            .lin_q
-            .forward(x.clone())
-            .reshape([b, g, self.num_heads, self.head_dim])
-            .swap_dims(1, 2);
-        let key = self
-            .lin_k
-            .forward(x.clone())
-            .reshape([b, g, self.num_heads, self.head_dim])
-            .swap_dims(1, 2);
-        let value = self
-            .lin_v
-            .forward(x.clone())
-            .reshape([b, g, self.num_heads, self.head_dim])
-            .swap_dims(1, 2);
+        // swap_dims is a strided view and burn's flash attention kernel ignores strides (it reads
+        // heads and rows interleaved: attention_test.rs, Swapped rows), so each is copied out to a
+        // real [b, H, g, D] buffer first.
+        let split = |t: Tensor<B, 3>| {
+            backend::contiguous(
+                t.reshape([b, g, self.num_heads, self.head_dim])
+                    .swap_dims(1, 2),
+            )
+        };
+        let query = split(self.lin_q.forward(x.clone()));
+        let key = split(self.lin_k.forward(x.clone()));
+        let value = split(self.lin_v.forward(x.clone()));
 
         // Use fused attention.
         let attn = attention(

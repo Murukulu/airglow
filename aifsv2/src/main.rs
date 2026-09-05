@@ -16,6 +16,8 @@ use crate::{
 };
 
 mod aifs;
+#[cfg(test)]
+mod attention_test;
 mod backend;
 mod block;
 mod bounding;

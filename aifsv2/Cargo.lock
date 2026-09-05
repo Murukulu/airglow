@@ -73,6 +73,7 @@ dependencies = [
  "burn-store",
  "chrono",
  "cubecl",
+ "cubek",
  "eccodes",
  "serde",
  "serde_json",
