@@ -10,9 +10,13 @@ use chrono::{TimeZone, Utc};
 
 use std::path::Path;
 
-use crate::{aifs::AifsV2Config, graph::GraphData, metadata::Metadata, processors::Processors};
+use crate::{
+    aifs::AifsV2Config, backend::Backend, graph::GraphData, metadata::Metadata,
+    processors::Processors,
+};
 
 mod aifs;
+mod backend;
 mod block;
 mod bounding;
 mod common;
@@ -25,6 +29,7 @@ mod metadata;
 mod named_node_attributes;
 mod output;
 mod processors;
+mod scatter_max;
 #[cfg(test)]
 mod test_backend;
 mod transformer;

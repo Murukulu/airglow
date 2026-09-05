@@ -9,7 +9,7 @@ use burn_store::SafetensorsStore;
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use eccodes::{CodesError, CodesFile, FallibleIterator, KeyRead, ProductKind};
 
-use crate::{forcings, graph::snapshot, metadata::Metadata};
+use crate::{backend::Backend, forcings, graph::snapshot, metadata::Metadata};
 
 #[derive(Debug)]
 pub enum Error {

@@ -21,6 +21,7 @@ use burn::prelude::*;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use eccodes::{BufMessage, CodesError, CodesFile, FallibleIterator, KeyWrite, ProductKind};
 
+use crate::backend::Backend;
 use crate::grib::CODES_MUTEX;
 use crate::metadata::{Mars, Metadata};
 

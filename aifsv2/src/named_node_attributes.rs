@@ -1,6 +1,7 @@
 use burn::{module::Param, prelude::*};
 
 use crate::{
+    backend::Backend,
     common::{TrainableTensor, TrainableTensorConfig},
     graph::GraphData,
 };

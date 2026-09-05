@@ -3,7 +3,7 @@ use core::{error, fmt};
 use burn::{prelude::*, tensor::Bool};
 use burn_store::SafetensorsStore;
 
-use crate::{graph::snapshot, metadata::Metadata};
+use crate::{backend::Backend, graph::snapshot, metadata::Metadata};
 
 // The anemoi pre/post-processing stage -- everything under `config.data.processors`.
 //   pre :  conditional_nan (identity) -> const_imputer -> normalizer

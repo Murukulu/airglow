@@ -7,7 +7,10 @@
 //! All of this runs in *normalised* space, because anemoi applies the boundings inside `forward`
 //! and only then hands off to `post_processors`.
 
-use crate::metadata::{self, BoundingConfig, ChannelKind, Metadata};
+use crate::{
+    backend::Backend,
+    metadata::{self, BoundingConfig, ChannelKind, Metadata},
+};
 use burn::{
     prelude::*,
     tensor::{Bool, activation::relu},

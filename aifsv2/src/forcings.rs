@@ -3,6 +3,8 @@ use std::{error, f64::consts::PI, fmt};
 use burn::prelude::*;
 use chrono::{DateTime, Datelike, NaiveTime, TimeZone, Timelike};
 
+use crate::backend::Backend;
+
 #[derive(Debug)]
 pub enum Error {
     DateTime(&'static str),

@@ -1,4 +1,7 @@
-use crate::common::{MultiLayerPreceptron, MultiLayerPreceptronConfig};
+use crate::{
+    backend::Backend,
+    common::{MultiLayerPreceptron, MultiLayerPreceptronConfig},
+};
 use burn::{
     nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig},
     prelude::*,

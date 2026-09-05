@@ -4,6 +4,7 @@ use burn::{prelude::*, tensor::IndexingUpdateOp};
 use burn_store::{PyTorchToBurnAdapter, SafetensorsStore};
 
 use crate::{
+    backend::Backend,
     bounding::{Bounding, BoundingType},
     common::PairTensor,
     decoder::{GraphTransformerBackwardMapper, GraphTransformerBackwardMapperConfig},

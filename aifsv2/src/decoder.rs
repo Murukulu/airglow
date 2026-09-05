@@ -4,6 +4,7 @@ use burn::{
 };
 
 use crate::{
+    backend::Backend,
     block::{GraphTransformerProcessorBlock, GraphTransformerProcessorBlockConfig},
     common::{PairTensor, TrainableTensor, TrainableTensorConfig},
     graph::{self, GraphData},

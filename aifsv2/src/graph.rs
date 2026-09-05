@@ -3,6 +3,8 @@ use core::{error, fmt};
 use burn::prelude::*;
 use burn_store::{ModuleStore, SafetensorsStore};
 
+use crate::backend::Backend;
+
 // The geometric half of the graph, as extracted from the .ckpt into safetensors.
 //
 // The 8 trainable columns per node and per edge are Parameters and live in the weights file

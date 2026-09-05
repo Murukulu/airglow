@@ -3,11 +3,12 @@ use burn::{
     config::Config,
     module::Module,
     nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig},
-    tensor::{Int, backend::Backend},
+    tensor::Int,
 };
 
-use crate::common::{
-    MultiLayerPreceptron, MultiLayerPreceptronConfig, PairTensor, graph_tranformer_conv,
+use crate::{
+    backend::Backend,
+    common::{MultiLayerPreceptron, MultiLayerPreceptronConfig, PairTensor, graph_tranformer_conv},
 };
 
 // Ref:

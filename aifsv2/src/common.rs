@@ -5,6 +5,8 @@ use burn::{
     tensor::IndexingUpdateOp,
 };
 
+use crate::backend::{self, Backend};
+
 pub type PairTensor<B, const D: usize> = (Tensor<B, D>, Tensor<B, D>);
 
 // Note: This is a lazy implementation of the MLP implemented in Anemoi.
@@ -104,14 +106,19 @@ pub fn sparse_segment_softmax<B: Backend>(
 
     let device = x.device();
 
-    // Burn does not have a scatter-max, where indices can be duplicate. It is easiest to just store a scalar value of
-    // the global max. We unsqueeze the scalar into a tensor to operate.
-    let m = x.clone().max().unsqueeze::<3>(); // [1] -> [1, 1, 1]
+    // Per-node max over incoming edges, [n_dst, H, 1], then sprayed back out to [E, H, 1]. The
+    // scatter starts from -inf rather than zeros: a node whose logits are all negative would
+    // otherwise get a shift of 0 and could still underflow.
+    let m = backend::scatter_max(
+        Tensor::<B, 3>::full([n_dst, h, 1], f32::NEG_INFINITY, &device),
+        0,
+        dst_idx.clone(),
+        x.clone(),
+    )
+    .select(0, dst_idx.clone());
 
-    // This computation should be per-segment max, but alas...
-    // We shift by the max to reduce the IEEE754 error propagation due to floating point division.
-    // The only thing that per-segment max would help with is underflow, making the numerator closer to the denominator
-    // and less risk of underflow.
+    // Shifting by the segment max keeps every numerator in (0, 1] with the largest exactly 1, so
+    // neither it nor the denominator can underflow.
     let numerator = (x - m).exp(); // [E, H, 1]
 
     // The softmax denominator summation. This will be of shape [n_dst, H, 1] as we want to work out the summation of
@@ -124,7 +131,7 @@ pub fn sparse_segment_softmax<B: Backend>(
         dst_idx.clone(),
         numerator.clone(),
         IndexingUpdateOp::Add,
-    ) + 1e-16; // Underflow protection. TODO(saiputravu): I'm concerned about model performance impact by this.
+    );
 
     // We regather denominator and spray out to shape [E, H, 1], re-using the same denominator for source-domain nodes
     // sharing the destination-domain nodes.

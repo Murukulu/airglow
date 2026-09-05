@@ -3,10 +3,11 @@ use burn::{
     config::Config,
     module::Module,
     nn::{Linear, LinearConfig},
-    tensor::{Int, backend::Backend},
+    tensor::Int,
 };
 
 use crate::{
+    backend::Backend,
     block::{GraphTransformerProcessorBlock, GraphTransformerProcessorBlockConfig},
     common::{PairTensor, TrainableTensor, TrainableTensorConfig},
     graph::{self, GraphData},

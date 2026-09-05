@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use burn::{prelude::*, tensor::Bool};
 
-use crate::metadata::Error::BadMask;
+use crate::{backend::Backend, metadata::Error::BadMask};
 
 #[derive(Debug)]
 pub enum Error {
