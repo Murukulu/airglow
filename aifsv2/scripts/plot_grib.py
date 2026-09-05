@@ -32,12 +32,16 @@ USAGE
     python scripts/plot_grib.py data/output/20260831000000-6h.grib2           # 2t
     python scripts/plot_grib.py data/output/20260831000000-6h.grib2 -w shortName=z,level=500
     python scripts/plot_grib.py data/output/20260831000000-6h.grib2 -w shortName=tp --cmap Blues
-    python scripts/plot_grib.py data/output/20260831000000-6h.grib2 -w shortName=msl -o msl.png
+    python scripts/plot_grib.py data/output/20260831000000-6h.grib2 -w shortName=msl -o msl.png --dpi 300
     python scripts/plot_grib.py data/output/20260831000000-6h.grib2 --temperature kelvin
     python scripts/plot_grib.py data/grib/20260831000000-0h-oper-fc.grib2 -w shortName=2t --show
+    python scripts/plot_grib.py data/output/20260831000000-6h.grib2 --all              # every field
+    python scripts/plot_grib.py data/output/20260831000000-6h.grib2 --all -w level=500
 
 `-w` takes ecCodes-style key=value pairs, comma separated; the first message matching all
 of them is plotted. `-o` names the PNG; without it one is written beside the input.
+`--all` plots every matching message instead (all of them when `-w` is not given), one PNG
+per message named <shortName>[-<level>].png in a directory: `-o`, or <input without suffix>.
 `--names` lists the shortNames in the file, `--list` every message.
 """
 
@@ -67,11 +71,19 @@ def parse_where(text: str) -> dict:
     return where
 
 
-def select(grbs: pygrib.open, where: dict):
+def select(grbs: pygrib.open, where: dict) -> list:
+    if not where:
+        return list(grbs)
     try:
-        return grbs.select(**where)[0]
+        return grbs.select(**where)
     except ValueError:
         sys.exit(f"error: no message matches {where}")
+
+
+def stem(grb) -> str:
+    if grb.typeOfLevel == "isobaricInhPa":
+        return f"{grb.shortName}-{grb.level}"
+    return grb.shortName
 
 
 def print_names(grbs: pygrib.open) -> None:
@@ -110,9 +122,12 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("file", type=Path, help="GRIB file to read")
-    parser.add_argument("-w", "--where", default="shortName=2t", help="key=value[,key=value]")
     parser.add_argument(
-        "-o", "--out", type=Path, help="PNG to write (default: <input>-<where>.png next to it)"
+        "-w", "--where", help="key=value[,key=value] (default: shortName=2t, or none with --all)"
+    )
+    parser.add_argument(
+        "-o", "--out", type=Path,
+        help="PNG to write, or directory with --all (default: next to the input)",
     )
     parser.add_argument("--cmap", help="matplotlib colormap name")
     parser.add_argument("--vmin", type=float)
@@ -123,11 +138,11 @@ def main() -> int:
         default="celsius",
         help="unit for fields GRIB stores in K (default: celsius); others are unaffected",
     )
-    parser.add_argument("--dpi", type=int, default=150)
+    parser.add_argument("--dpi", type=int, default=150, help="PNG resolution (default: 150)")
     parser.add_argument("--no-coast", action="store_true")
-    parser.add_argument(
-        "--show", action="store_true", help="open a window as well as writing the PNG"
-    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--show", action="store_true", help="open a window as well as writing the PNG")
+    mode.add_argument("--all", action="store_true", help="plot every matching message")
     parser.add_argument("--list", action="store_true", help="list every message and exit")
     parser.add_argument(
         "--names", action="store_true", help="list the shortNames with their levels and exit"
@@ -141,6 +156,7 @@ def main() -> int:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    where = args.where if args.where is not None else ("" if args.all else "shortName=2t")
     with pygrib.open(str(args.file)) as grbs:
         if args.list:
             for grb in grbs:
@@ -150,15 +166,30 @@ def main() -> int:
             print_names(grbs)
             return 0
 
-        grb = select(grbs, parse_where(args.where))
-        values = grb.values  # masked array; the bitmap becomes the mask
-        lats, lons = grb.latlons()
-        short_name = grb.shortName
-        title = f"{grb.name} ({short_name})"
-        if grb.typeOfLevel == "isobaricInhPa":
-            title += f" {grb.level} hPa"
-        title += f"  {grb.validDate:%Y-%m-%d %H:%M} UTC, step {grb.endStep} h"
-        units = grb.units
+        matches = select(grbs, parse_where(where))
+        if args.all:
+            out_dir = args.out or args.file.with_suffix("")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for grb in matches:
+                plot(grb, args, plt, out_dir / f"{stem(grb)}.png")
+        else:
+            slug = where.replace("=", "_").replace(",", "-")
+            out = args.out or args.file.with_name(f"{args.file.stem}-{slug}.png")
+            plot(matches[0], args, plt, out)
+    if args.show:
+        plt.show()
+    return 0
+
+
+def plot(grb, args, plt, out: Path) -> None:
+    values = grb.values  # masked array; the bitmap becomes the mask
+    lats, lons = grb.latlons()
+    short_name = grb.shortName
+    title = f"{grb.name} ({short_name})"
+    if grb.typeOfLevel == "isobaricInhPa":
+        title += f" {grb.level} hPa"
+    title += f"  {grb.validDate:%Y-%m-%d %H:%M} UTC, step {grb.endStep} h"
+    units = grb.units
 
     # GRIB keeps every temperature in kelvin; only the display changes here.
     if units == "K" and args.temperature == "celsius":
@@ -167,7 +198,8 @@ def main() -> int:
 
     finite = values.compressed() if np.ma.isMaskedArray(values) else values.ravel()
     if finite.size == 0:
-        sys.exit("error: every point is missing")
+        print(f"skipped {out}: every point is missing", file=sys.stderr)
+        return
 
     signed = short_name in SIGNED
     if signed:
@@ -200,13 +232,10 @@ def main() -> int:
         transform=ax.transAxes, fontsize=8, color="0.35",
     )
 
-    slug = args.where.replace("=", "_").replace(",", "-")
-    out = args.out or args.file.with_name(f"{args.file.stem}-{slug}.png")
     fig.savefig(out, dpi=args.dpi)
     print(f"wrote {out}")
-    if args.show:
-        plt.show()
-    return 0
+    if not args.show:
+        plt.close(fig)
 
 
 if __name__ == "__main__":
