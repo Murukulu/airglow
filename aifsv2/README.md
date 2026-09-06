@@ -24,6 +24,8 @@ main mechanism for tracking work and writing up notes and any PRs I created. The
 I suggest going to issues that you find interesting as I've tried to maintain a rich (but rough) set of "what am I up to" and
 "what problem am I facing, how did I resolve it" self-conversations.
 
+The instructions for [building](#build-and-run) and [testing](#tests) are closer to the bottom.
+
 > AI Disclaimer:
 > This model was built with the help of AI but the primary effort was done by me. AI helped me with debugging issues; 
 > discussing thoughts around design; script generation; and some code cleanup. You can see my specific journey and effort
