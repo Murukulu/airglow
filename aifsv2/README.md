@@ -26,7 +26,7 @@ but every map on this page came out of this code. [How it got built](#how-this-g
 
 ## Overview of what's in here
 
-- Encoder $ \to $ 16-layer transformer processor $ \to $ decoder. This matches anemoi `models-0.9.3`, the version
+- Encoder $\to$ 16-layer transformer processor $\to$ decoder. This matches anemoi `models-0.9.3`, the version
   the checkpoint (point in time of creation) was trained with. `1024` channels, `16` heads, `253M` parameters.
 - Both bipartite graphs read straight out of the checkpoint's `HeteroData` as safetensors:
   `748,348` `data.hidden` edges and `1,626,240` `hidden.data`, onto a `40,320`-node hidden mesh.
@@ -42,7 +42,7 @@ but every map on this page came out of this code. [How it got built](#how-this-g
 - Nine computed forcings, pre/post processors (normaliser, constant imputer, conditional
   NaN) and Relu / Hardtanh / Fraction boundings, all from the checkpoint's config.
 - GRIB parsing through ecCodes. `lsm.grib` is GRIB1 on a reduced Gaussian grid and the forecast messages
-  are `grid_ccsds`; none of the Rust GRIB crates decode either. 0.25° $ \to $ N320 uses earthkit's
+  are `grid_ccsds`; none of the Rust GRIB crates decode either. 0.25° $\to$ N320 uses earthkit's
   precomputed sparse matrix, fetched once and applied in Rust.
 - GRIB2 output by cloning anemoi's N320 template messages, one per variable, 119 of them.
 - `AIFS_DUMP_DIR` writes every forward stage as raw f32; `scripts/ref_*.py` run the same stages in
@@ -234,8 +234,8 @@ gantt
 | When | Issue | What happened |
 |---|---|---|
 | 14–19 Jul | [#1](https://github.com/Murukulu/airglow/issues/1), [#2](https://github.com/Murukulu/airglow/issues/2), [#3](https://github.com/Murukulu/airglow/issues/3) | Read up on Aurora, AIFS, Earth-2, EPT-2. Nowcasting is more or less solved and we'd add nothing over BBC weather; medium-range is where three days' notice actually changes what you can do. Picked AIFS knowing it was the harder one, with a three-week bail-out to Aurora we never used. |
-| 22 Jul–1 Aug | [#8](https://github.com/Murukulu/airglow/issues/8) | A GCN on the Leffingwell odour dataset to learn burn. SMILES $ \to $ graph, PyG-style batching by offsetting node indices into one big disconnected graph. Trains, about 64 on hamming score; good enough for what it was for. |
-| 1–2 Aug | [#10](https://github.com/Murukulu/airglow/issues/10), [#14](https://github.com/Murukulu/airglow/issues/14) | Pulled the model summary out of the ckpt metadata: 253M parameters, encoder $ \to $ 16 processor blocks $ \to $ decoder. The ckpt won't unpickle without `flash_attn`, which has no mac build; stubbing the class on unpickle got safetensors out. Split the rest into one ticket per module. |
+| 22 Jul–1 Aug | [#8](https://github.com/Murukulu/airglow/issues/8) | A GCN on the Leffingwell odour dataset to learn burn. SMILES $\to$ graph, PyG-style batching by offsetting node indices into one big disconnected graph. Trains, about 64 on hamming score; good enough for what it was for. |
+| 1–2 Aug | [#10](https://github.com/Murukulu/airglow/issues/10), [#14](https://github.com/Murukulu/airglow/issues/14) | Pulled the model summary out of the ckpt metadata: 253M parameters, encoder $\to$ 16 processor blocks $\to$ decoder. The ckpt won't unpickle without `flash_attn`, which has no mac build; stubbing the class on unpickle got safetensors out. Split the rest into one ticket per module. |
 | 2–15 Aug | [#16](https://github.com/Murukulu/airglow/issues/16) | The wall. PyG's `MessagePassing` is thirty-odd methods of dispatch around one function, so it didn't get ported. Then burn's scatter turned out to only sum, and the softmax here is over each node's incoming edges, not the whole tensor. `graph_transformer_conv` and the segment softmax came out of about a week on this; the working-out is in [`docs/graph-transformer-explained.md`](docs/graph-transformer-explained.md). |
 | 9–15 Aug | [#17](https://github.com/Murukulu/airglow/issues/17), [#18](https://github.com/Murukulu/airglow/issues/18) | Processor: burn has no windowed attention and its `MultiHeadAttention` can't carry these weights, so a hand-written MHA, full attention for now ([#26](https://github.com/Murukulu/airglow/issues/26)). Decoder: a thin wrapper around the proc block, done in a day. |
 | 10–16 Aug | [#12](https://github.com/Murukulu/airglow/issues/12) | The input side, which turned out bigger than the model. Anemoi ships the graph inside the pickle, so it comes out as safetensors (748,348 + 1,626,240 edges). Open data is 0.25° and the model is N320, so earthkit's regrid matrix, extracted offline, with a 720-column rotation because the two disagree on where longitude starts. None of the Rust GRIB crates read these files; ecCodes does. Nine forcings, three silent date bugs found on the way. |
@@ -247,31 +247,31 @@ gantt
 <details>
 <summary>Every issue and PR</summary>
 
-| # | Issue | Opened $ \to $ closed | |
+| # | Issue | Opened $\to$ closed | |
 |---|---|---|---|
-| [#1](https://github.com/Murukulu/airglow/issues/1) | Ideas for final product | 14 Jul $ \to $ *open* | farming advice by SMS, aviation, grid load, heatwaves |
-| [#2](https://github.com/Murukulu/airglow/issues/2) | Look at current SOTA weather models | 14 Jul $ \to $ 19 Jul | Aurora, AIFS, Earth-2, EPT-2, plus a crash course in what a forecast is |
-| [#3](https://github.com/Murukulu/airglow/issues/3) | Identify model requirements | 14 Jul $ \to $ 2 Aug | open weights, write an inference engine, fine-tuning later |
-| [#4](https://github.com/Murukulu/airglow/issues/4) | Type up meeting notes | 19 Jul $ \to $ 2 Aug | `meeting_notes/` |
-| [#5](https://github.com/Murukulu/airglow/issues/5) | AIFS v1 paper review | 19 Jul $ \to $ *open* | |
-| [#6](https://github.com/Murukulu/airglow/issues/6) | AIFS v2 paper review | 19 Jul $ \to $ *open* | first read: input $ \to $ LN $ \to $ enc $ \to $ proc ×16 $ \to $ dec $ \to $ LN |
-| [#7](https://github.com/Murukulu/airglow/issues/7) | (Tom) GNN in burn | 19 Jul $ \to $ *open* | MUTAG |
-| [#8](https://github.com/Murukulu/airglow/issues/8) | (Sai) GNN in burn | 19 Jul $ \to $ 1 Aug | Leffingwell GCN, `gnn_leffingwell_odor/` |
-| [#10](https://github.com/Murukulu/airglow/issues/10) | Implementing AIFS v2 single | 1 Aug $ \to $ 2 Sep | the root ticket; closed when it produced output |
-| [#11](https://github.com/Murukulu/airglow/issues/11) | How the data input is ingested | 2 Aug $ \to $ 10 Aug | folded into #12 |
-| [#12](https://github.com/Murukulu/airglow/issues/12) | Representation of HeteroGraph | 2 Aug $ \to $ 16 Aug | became the whole input side: graph, GRIB, N320, regrid, forcings |
-| [#13](https://github.com/Murukulu/airglow/issues/13) | Model components and forward pass | 2 Aug $ \to $ 15 Aug | parent of #15–#18 |
-| [#14](https://github.com/Murukulu/airglow/issues/14) | Parse model weights | 2 Aug $ \to $ 2 Aug | ckpt $ \to $ safetensors, `flash_attn` stubbed on unpickle |
-| [#15](https://github.com/Murukulu/airglow/issues/15) | NamedNodesAttributes | 2 Aug $ \to $ 15 Aug | lat/lon features + trainable tensors per node set |
-| [#16](https://github.com/Murukulu/airglow/issues/16) | GraphTransformerForwardMapper | 2 Aug $ \to $ 15 Aug | the encoder; `graph_transformer_conv`, segment softmax |
-| [#17](https://github.com/Murukulu/airglow/issues/17) | TransformerProcessor | 2 Aug $ \to $ 15 Aug | 16 blocks, no sliding window yet |
-| [#18](https://github.com/Murukulu/airglow/issues/18) | GraphTransformerBackwardMapper | 2 Aug $ \to $ 15 Aug | the decoder; thin wrapper around the proc block |
-| [#26](https://github.com/Murukulu/airglow/issues/26) | Use sliding window attention | 13 Aug $ \to $ *open* | window of 1120 nodes; needs a kernel |
-| [#27](https://github.com/Murukulu/airglow/issues/27) | Pre/post-processor and boundings | 13 Aug $ \to $ 22 Aug | normaliser, imputer, conditional NaN, Relu/Hardtanh/Fraction |
-| [#30](https://github.com/Murukulu/airglow/issues/30) | Memory issues | 22 Aug $ \to $ *open* | ~27 GB forward vs 18 GB laptop; non-blocking on a bigger GPU |
-| [#31](https://github.com/Murukulu/airglow/issues/31) | Model output is quite wrong | 2 Sep $ \to $ 5 Sep | global-max softmax $ \to $ `scatter_max`; strided query $ \to $ contiguous |
-| [#32](https://github.com/Murukulu/airglow/issues/32) | Strided tensor vs burn attention | 5 Sep $ \to $ *open* | why the flash query reader ignores `swap_dims` strides |
-| [#33](https://github.com/Murukulu/airglow/issues/33) | Error propagation in later proc blocks | 5 Sep $ \to $ *open* | drift grows block by block, 0.96 at the decoder |
+| [#1](https://github.com/Murukulu/airglow/issues/1) | Ideas for final product | 14 Jul $\to$ *open* | farming advice by SMS, aviation, grid load, heatwaves |
+| [#2](https://github.com/Murukulu/airglow/issues/2) | Look at current SOTA weather models | 14 Jul $\to$ 19 Jul | Aurora, AIFS, Earth-2, EPT-2, plus a crash course in what a forecast is |
+| [#3](https://github.com/Murukulu/airglow/issues/3) | Identify model requirements | 14 Jul $\to$ 2 Aug | open weights, write an inference engine, fine-tuning later |
+| [#4](https://github.com/Murukulu/airglow/issues/4) | Type up meeting notes | 19 Jul $\to$ 2 Aug | `meeting_notes/` |
+| [#5](https://github.com/Murukulu/airglow/issues/5) | AIFS v1 paper review | 19 Jul $\to$ *open* | |
+| [#6](https://github.com/Murukulu/airglow/issues/6) | AIFS v2 paper review | 19 Jul $\to$ *open* | first read: input $\to$ LN $\to$ enc $\to$ proc ×16 $\to$ dec $\to$ LN |
+| [#7](https://github.com/Murukulu/airglow/issues/7) | (Tom) GNN in burn | 19 Jul $\to$ *open* | MUTAG |
+| [#8](https://github.com/Murukulu/airglow/issues/8) | (Sai) GNN in burn | 19 Jul $\to$ 1 Aug | Leffingwell GCN, `gnn_leffingwell_odor/` |
+| [#10](https://github.com/Murukulu/airglow/issues/10) | Implementing AIFS v2 single | 1 Aug $\to$ 2 Sep | the root ticket; closed when it produced output |
+| [#11](https://github.com/Murukulu/airglow/issues/11) | How the data input is ingested | 2 Aug $\to$ 10 Aug | folded into #12 |
+| [#12](https://github.com/Murukulu/airglow/issues/12) | Representation of HeteroGraph | 2 Aug $\to$ 16 Aug | became the whole input side: graph, GRIB, N320, regrid, forcings |
+| [#13](https://github.com/Murukulu/airglow/issues/13) | Model components and forward pass | 2 Aug $\to$ 15 Aug | parent of #15–#18 |
+| [#14](https://github.com/Murukulu/airglow/issues/14) | Parse model weights | 2 Aug $\to$ 2 Aug | ckpt $\to$ safetensors, `flash_attn` stubbed on unpickle |
+| [#15](https://github.com/Murukulu/airglow/issues/15) | NamedNodesAttributes | 2 Aug $\to$ 15 Aug | lat/lon features + trainable tensors per node set |
+| [#16](https://github.com/Murukulu/airglow/issues/16) | GraphTransformerForwardMapper | 2 Aug $\to$ 15 Aug | the encoder; `graph_transformer_conv`, segment softmax |
+| [#17](https://github.com/Murukulu/airglow/issues/17) | TransformerProcessor | 2 Aug $\to$ 15 Aug | 16 blocks, no sliding window yet |
+| [#18](https://github.com/Murukulu/airglow/issues/18) | GraphTransformerBackwardMapper | 2 Aug $\to$ 15 Aug | the decoder; thin wrapper around the proc block |
+| [#26](https://github.com/Murukulu/airglow/issues/26) | Use sliding window attention | 13 Aug $\to$ *open* | window of 1120 nodes; needs a kernel |
+| [#27](https://github.com/Murukulu/airglow/issues/27) | Pre/post-processor and boundings | 13 Aug $\to$ 22 Aug | normaliser, imputer, conditional NaN, Relu/Hardtanh/Fraction |
+| [#30](https://github.com/Murukulu/airglow/issues/30) | Memory issues | 22 Aug $\to$ *open* | ~27 GB forward vs 18 GB laptop; non-blocking on a bigger GPU |
+| [#31](https://github.com/Murukulu/airglow/issues/31) | Model output is quite wrong | 2 Sep $\to$ 5 Sep | global-max softmax $\to$ `scatter_max`; strided query $\to$ contiguous |
+| [#32](https://github.com/Murukulu/airglow/issues/32) | Strided tensor vs burn attention | 5 Sep $\to$ *open* | why the flash query reader ignores `swap_dims` strides |
+| [#33](https://github.com/Murukulu/airglow/issues/33) | Error propagation in later proc blocks | 5 Sep $\to$ *open* | drift grows block by block, 0.96 at the decoder |
 
 | PR | Branch | Merged | For |
 |---|---|---|---|
