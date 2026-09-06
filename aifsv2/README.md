@@ -17,7 +17,12 @@ block ([`correlation.txt`](static/correlation.txt)). It is not finished, some is
 - [ ] we should improve the CLI ([#34](https://github.com/Murukulu/airglow/issues/34))
 - [ ] we should reduce the memory footprint of the model, it currently takes about 35-40GB VRAM ([#30](https://github.com/Murukulu/airglow/issues/30))
 
-but every map on this page came out of this code. [How it got built](#how-this-got-built) is at the bottom.
+but every map on this page came out of this code.
+
+The details around [how it got built](#how-this-got-built) is closer to the bottom, this shows the git issues, which was my
+main mechanism for tracking work and writing up notes and any PRs I created. There is also a Gantt chart with a rough timeline.
+I suggest going to issues that you find interesting as I've tried to maintain a rich (but rough) set of "what am I up to" and
+"what problem am I facing, how did I resolve it" self-conversations.
 
 > AI Disclaimer:
 > This model was built with the help of AI but the primary effort was done by me. AI helped me with debugging issues; 
@@ -140,64 +145,6 @@ swell height by period band:
 
 </details>
 
-
-## Build and run
-
-You need an NVIDIA GPU (`type MyBackend = Cuda;` in [`src/main.rs`](src/main.rs); swap it for
-`Wgpu` on a machine without one), the nix-dev shell for ecCodes, and `uv` for the Python side.
-
-```sh
-nix develop                  # from the repo root: eccodes, proj, libclang
-cd aifsv2
-scripts/generate-data.sh     # creates all data needed; checkpoint from HuggingFace -> safetensors, graph, regrid matrix, GRIB pair
-cargo run --release          # -> data/output/20260831000000-6h.grib2
-```
-
-ECMWF open data only keeps about four days, so on a fresh checkout pass a recent base time and
-point the `OPER_PATH` / `WAVE_PATH` constants in `src/main.rs` at what it downloaded:
-
-```sh
-BASE_TIME=2026-09-05T00 scripts/generate-data.sh
-```
-
-To plot the output (this is how `static/images/` was made) and to diff the forward against
-PyTorch stage by stage:
-
-```sh
-uv run scripts/plot_grib.py data/output/20260831000000-6h.grib2 --all -o static/images
-AIFS_DUMP_DIR=data/dump cargo run --release   # every stage to data/dump/*.f32
-python scripts/ref_forward.py                 # same stages from PyTorch; needs a venv with anemoi-models 0.9.3
-python scripts/ref_processor.py --window None
-python scripts/ref_decoder.py                
-python scripts/compare_dump.py                # compare the model results to anemoi model (no sliding window)
-```
-
-## Tests
-
-```sh
-cargo test --release
-```
-
-Every test runs on the GPU. `build.rs` picks Cuda when the NVIDIA driver is loaded, else Wgpu but
-never ndarray, because scatter-add with duplicate indices comes out right on the CPU by accident
-and that is exactly the thing being tested. `AIFS_TEST_BACKEND=cuda|cuda-unfused|wgpu` overrides
-it (`cuda-unfused` tells a Fusion problem apart from a kernel one). Cargo won't notice the hardware
-changed, so `touch build.rs` after moving machines. `cargo test -- --ignored` adds the one test
-that runs attention at the real `40,320`-node size.
-
-54 tests in 13 files, roughly:
-
-| What | Files | Checks |
-|---|---|---|
-| GPU kernels | `attention_test` | burn's flash attention against its own naive fallback, one test per strategy; the `swap_dims` query bug ([#32](https://github.com/Murukulu/airglow/issues/32)) is asserted to still fail so we notice when upstream fixes it |
-| Model modules | `common_test`, `block_test`, `encoder_test`, `decoder_test`, `transformer_test`, `aifs_test` | shapes, both residuals, chunking, and that the Burn parameter tree matches the checkpoint's keys exactly |
-| GRIB in and out | `grib_test`, `output_test` | routing to variable names, bitmap → NaN, the regrid against earthkit's matrix (and that skipping the 720-column longitude rotation is wrong), GRIB2 round-trip through ecCodes |
-| Reference values | `forcings_test`, `processors_test` | the nine forcings against earthkit to 1e-6; normaliser and imputer invert to fp32 |
-| Checkpoint metadata | `metadata_test`, `bounding_test` | MARS identities, accumulation flags and the boundings against the real `ai-models.json` |
-
-Three tests read `data/quiet_grub/anemoi-metadata`, which `generate-data.sh` unpacks. Everything
-else builds its own inputs.
-
 ## How this got built
 
 14 July to 5 September 2026. 23 issues, 9 PRs, 52 commits, eight design and review docs in
@@ -290,3 +237,61 @@ gantt
 The longer thinking is in [`docs/`](docs/): what GRIB is and what's in these files, the input
 pipeline spec, the graph transformer explained from the paper down, the encoder design note, and
 reviews of all three modules against anemoi.
+
+## Build and run
+
+You need an NVIDIA GPU (`type MyBackend = Cuda;` in [`src/main.rs`](src/main.rs); swap it for
+`Wgpu` on a machine without one), the nix-dev shell for ecCodes, and `uv` for the Python side.
+
+```sh
+nix develop                  # from the repo root: eccodes, proj, libclang
+cd aifsv2
+scripts/generate-data.sh     # creates all data needed; checkpoint from HuggingFace -> safetensors, graph, regrid matrix, GRIB pair
+cargo run --release          # -> data/output/20260831000000-6h.grib2
+```
+
+ECMWF open data only keeps about four days, so on a fresh checkout pass a recent base time and
+point the `OPER_PATH` / `WAVE_PATH` constants in `src/main.rs` at what it downloaded:
+
+```sh
+BASE_TIME=2026-09-05T00 scripts/generate-data.sh
+```
+
+To plot the output (this is how `static/images/` was made) and to diff the forward against
+PyTorch stage by stage:
+
+```sh
+uv run scripts/plot_grib.py data/output/20260831000000-6h.grib2 --all -o static/images
+AIFS_DUMP_DIR=data/dump cargo run --release   # every stage to data/dump/*.f32
+python scripts/ref_forward.py                 # same stages from PyTorch; needs a venv with anemoi-models 0.9.3
+python scripts/ref_processor.py --window None
+python scripts/ref_decoder.py                
+python scripts/compare_dump.py                # compare the model results to anemoi model (no sliding window)
+```
+
+## Tests
+
+```sh
+cargo test --release
+```
+
+Every test runs on the GPU. `build.rs` picks Cuda when the NVIDIA driver is loaded, else Wgpu but
+never ndarray, because scatter-add with duplicate indices comes out right on the CPU by accident
+and that is exactly the thing being tested. `AIFS_TEST_BACKEND=cuda|cuda-unfused|wgpu` overrides
+it (`cuda-unfused` tells a Fusion problem apart from a kernel one). Cargo won't notice the hardware
+changed, so `touch build.rs` after moving machines. `cargo test -- --ignored` adds the one test
+that runs attention at the real `40,320`-node size.
+
+54 tests in 13 files, roughly:
+
+| What | Files | Checks |
+|---|---|---|
+| GPU kernels | `attention_test` | burn's flash attention against its own naive fallback, one test per strategy; the `swap_dims` query bug ([#32](https://github.com/Murukulu/airglow/issues/32)) is asserted to still fail so we notice when upstream fixes it |
+| Model modules | `common_test`, `block_test`, `encoder_test`, `decoder_test`, `transformer_test`, `aifs_test` | shapes, both residuals, chunking, and that the Burn parameter tree matches the checkpoint's keys exactly |
+| GRIB in and out | `grib_test`, `output_test` | routing to variable names, bitmap → NaN, the regrid against earthkit's matrix (and that skipping the 720-column longitude rotation is wrong), GRIB2 round-trip through ecCodes |
+| Reference values | `forcings_test`, `processors_test` | the nine forcings against earthkit to 1e-6; normaliser and imputer invert to fp32 |
+| Checkpoint metadata | `metadata_test`, `bounding_test` | MARS identities, accumulation flags and the boundings against the real `ai-models.json` |
+
+Three tests read `data/quiet_grub/anemoi-metadata`, which `generate-data.sh` unpacks. Everything
+else builds its own inputs.
+
