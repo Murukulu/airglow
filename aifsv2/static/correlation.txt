@@ -1,0 +1,59 @@
+pre_x            ok   max|d| 3.815e-06  rel rms 3.214e-07  corr 1.000000  (tol 1e-05)
+x_latent_data    ok   max|d| 3.815e-06  rel rms 3.205e-07  corr 1.000000  (tol 1e-06)
+  cols 0:106 == pre_x[0, 0]: ok
+  cols 106:212 == pre_x[0, 1]: ok
+  cols 212:224: 12 node attributes (latlons + trainable)
+x_latent_hidden  ok   max|d| 0.000e+00  rel rms 0.000e+00  corr 1.000000  (tol 1e-06)
+enc_x_src_emb    skip: no ref dump, not comparing
+enc_x_dst_emb    skip: no ref dump, not comparing
+enc_edge_attr    skip: no ref dump, not comparing
+enc_x_src_norm   skip: no rust or ref dump, not comparing
+enc_x_dst_norm   skip: no rust or ref dump, not comparing
+enc_x_r          skip: no rust or ref dump, not comparing
+enc_query        skip: no rust or ref dump, not comparing
+enc_key          skip: no rust or ref dump, not comparing
+enc_value        skip: no rust or ref dump, not comparing
+enc_edges        skip: no rust or ref dump, not comparing
+enc_conv         skip: no ref dump, not comparing
+enc_proj         skip: no ref dump, not comparing
+enc_attn_out     skip: no ref dump, not comparing
+enc_x_latent     ok   max|d| 4.406e-02  rel rms 7.084e-04  corr 1.000000  (tol 1e-03)
+proc0_x_norm     ok   max|d| 1.431e-06  rel rms 8.299e-08  corr 1.000000  (tol 1e-03)
+proc0_query      ok   max|d| 4.622e-03  rel rms 1.080e-04  corr 1.000000  (tol 1e-03)
+proc0_key        ok   max|d| 5.939e-03  rel rms 1.241e-04  corr 1.000000  (tol 1e-03)
+proc0_value      ok   max|d| 1.051e-03  rel rms 1.556e-04  corr 1.000000  (tol 1e-03)
+proc0_query_rearranged ok   max|d| 4.622e-03  rel rms 1.080e-04  corr 1.000000  (tol 1e-03)
+proc0_key_rearranged ok   max|d| 5.939e-03  rel rms 1.241e-04  corr 1.000000  (tol 1e-03)
+proc0_value_rearranged ok   max|d| 1.051e-03  rel rms 1.556e-04  corr 1.000000  (tol 1e-03)
+proc0_attn       ok   max|d| 1.923e-02  rel rms 3.676e-04  corr 1.000000  (tol 1e-03)
+proc0_proj       ok   max|d| 1.284e-02  rel rms 4.523e-04  corr 1.000000  (tol 1e-03)
+proc0_attn_res   ok   max|d| 1.284e-02  rel rms 1.245e-04  corr 1.000000  (tol 1e-03)
+proc0_mlp_norm   ok   max|d| 2.028e-03  rel rms 1.874e-04  corr 1.000000  (tol 1e-03)
+proc0_mlp        ok   max|d| 7.184e-03  rel rms 3.014e-04  corr 1.000000  (tol 1e-03)
+proc0_out        ok   max|d| 1.295e-02  rel rms 1.497e-04  corr 1.000000  (tol 4e-03)
+proc1_out        ok   max|d| 7.731e-02  rel rms 3.879e-04  corr 1.000000  (tol 4e-03)
+proc2_out        ok   max|d| 4.724e-01  rel rms 5.796e-04  corr 1.000000  (tol 4e-03)
+proc3_out        ok   max|d| 5.468e-01  rel rms 7.498e-04  corr 1.000000  (tol 4e-03)
+proc4_out        ok   max|d| 4.857e-01  rel rms 7.846e-04  corr 1.000000  (tol 4e-03)
+proc5_out        ok   max|d| 5.627e-01  rel rms 9.378e-04  corr 1.000000  (tol 4e-03)
+proc6_out        ok   max|d| 4.998e-01  rel rms 1.048e-03  corr 0.999999  (tol 4e-03)
+proc7_out        ok   max|d| 4.902e-01  rel rms 1.100e-03  corr 0.999999  (tol 4e-03)
+proc8_out        ok   max|d| 5.122e-01  rel rms 1.163e-03  corr 0.999999  (tol 4e-03)
+proc9_out        ok   max|d| 5.833e-01  rel rms 1.524e-03  corr 0.999999  (tol 4e-03)
+proc10_out       ok   max|d| 6.697e-01  rel rms 1.566e-03  corr 0.999999  (tol 4e-03)
+proc11_out       ok   max|d| 6.950e-01  rel rms 1.608e-03  corr 0.999999  (tol 4e-03)
+proc12_out       ok   max|d| 8.057e-01  rel rms 1.704e-03  corr 0.999999  (tol 4e-03)
+proc13_out       ok   max|d| 8.598e-01  rel rms 1.997e-03  corr 0.999998  (tol 4e-03)
+proc14_out       ok   max|d| 1.034e+00  rel rms 2.085e-03  corr 0.999998  (tol 4e-03)
+proc15_out       ok   max|d| 1.014e+00  rel rms 2.200e-03  corr 0.999998  (tol 4e-03)
+proc_x_latent    ok   max|d| 1.172e+00  rel rms 3.132e-03  corr 0.999995  (tol 1e-02)
+dec_edge_attr    ok   max|d| 0.000e+00  rel rms 0.000e+00  corr 1.000000  (tol 1e-06)
+dec_x_dst_emb    ok   max|d| 5.968e-03  rel rms 2.669e-04  corr 1.000000  (tol 1e-03)
+dec_conv         ok   max|d| 1.888e+01  rel rms 2.955e-01  corr 0.961474  (tol 3e-01)
+dec_proj         ok   max|d| 1.428e+01  rel rms 1.656e-01  corr 0.987633  (tol 3e-01)
+dec_attn_out     ok   max|d| 1.428e+01  rel rms 1.421e-01  corr 0.990744  (tol 3e-01)
+dec_block_out    ok   max|d| 3.881e+01  rel rms 1.052e-01  corr 0.994701  (tol 3e-01)
+dec_norm         ok   max|d| 8.192e+00  rel rms 8.816e-02  corr 0.996097  (tol 3e-01)
+dec_x_out        ok   max|d| 1.335e+02  rel rms 2.788e-01  corr 0.963114  (tol 3e-01)
+bounded_x_out    ok   max|d| 1.331e+02  rel rms 2.183e-01  corr 0.975765  (tol 3e-01)
+post             ok   max|d| 5.891e+06  rel rms 6.462e-02  corr 0.997884  (tol 3e-01)
